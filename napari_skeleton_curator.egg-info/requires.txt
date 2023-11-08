@@ -1,0 +1,7 @@
+napari
+numpy
+networkx
+pandas
+morphosamplers
+scikit-image
+scipy

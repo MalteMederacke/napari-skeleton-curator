@@ -1,0 +1,8 @@
+README.txt
+setup.py
+code/skeleton.py
+napari_skeleton_curator.egg-info/PKG-INFO
+napari_skeleton_curator.egg-info/SOURCES.txt
+napari_skeleton_curator.egg-info/dependency_links.txt
+napari_skeleton_curator.egg-info/requires.txt
+napari_skeleton_curator.egg-info/top_level.txt
