@@ -15,6 +15,13 @@ from psygnal.containers import EventedSet
 from scipy.spatial.transform import Rotation
 from skimage.io import imsave
 
+import pyqtgraph as pg
+from qtpy.QtCore import Qt
+from qtpy.QtWidgets import QComboBox, QVBoxLayout, QWidget,QPushButton
+from skimage.transform import rotate
+from superqt.sliders import QLabeledSlider
+
+
 
 NODE_COORDINATE_KEY = "node_coordinate"
 EDGE_COORDINATES_KEY = "edge_coordinates"
@@ -782,10 +789,11 @@ class SkeletonBoundingBoxView:
 
 class SkeletonViewer:
     def __init__(self, skeleton: Skeleton3D,
-                image: np.ndarray, 
+                image: np.ndarray,
+                image_voxel_size: float,
                 viewer: Optional[napari.Viewer] = None,
                 edge_width: int = 1,
-                node_size: int = 3
+                nodes_size: int = 3
                 ):
         self.skeleton = skeleton
 
@@ -804,14 +812,18 @@ class SkeletonViewer:
         
         self.edge_width = edge_width
 
+        # self.nodes_size = nodes_size
+
         # store the image for sampling
         # we will likely factor this out later
         self.image = image
 
+        #store voxel size (assume isotropic for now)
+        self.image_voxel_size = image_voxel_size
         # initialize the viewer
         self._initialize_viewer(image=image, 
-                                edge_width=edge_width, 
-                                node_size=node_size)
+                                edge_width=edge_width,
+                                nodes_size = nodes_size)
 
         # set the default highlight colors
         self.highlight_colormap: Dict[bool, np.ndarray] = {
@@ -845,17 +857,26 @@ class SkeletonViewer:
             self.edges_layer.features[EDGE_FEATURES_HIGHLIGHT_KEY]
         ]
 
-    def _initialize_viewer(self, image: Optional[np.ndarray] = None, edge_width: int = 1, node_size: int = 3):
+    def _initialize_viewer(self, image: Optional[np.ndarray] = None, edge_width: int = 1, nodes_size:int = 3):
         # setup the node layer
-        self.nodes_layer = self._initialize_nodes(node_size=node_size)
-
+        print("initilize nodes")
+        self.nodes_layer = self._initialize_nodes(nodes_size)
         # setup the edges layer
+        print("initilize edges")
         self.edges_layer = self._initialize_edges(edge_width=edge_width)
         
 
         # add the widget for viewing around a node
-        self.sub_volume_widget = magicgui(self.view_subvolume_around_node, node_index={"max": 1E7, "min": 0})
+        self.sub_volume_widget = magicgui(self.view_subvolume_around_node, 
+                                        node_index={"max": 1E7, "min": 0}, 
+                                        # image_voxel_size=dict(default = tuple([self.image_voxel_size]*3))
+                                        )
         self.viewer.window.add_dock_widget(self.sub_volume_widget.native)
+
+        # add widget for plot the image around sliced edge
+        image_slice_widget = QtImageSliceWidget()
+        image_slice_widget.viewer = self
+        self.viewer.window.add_dock_widget(image_slice_widget, area='right')
 
         # add the widget for slicing edges
         self.slicing_widget = magicgui(self.slice_selected_edges)
@@ -897,7 +918,7 @@ class SkeletonViewer:
         # hook up the events
         self._connect_events()
 
-    def _initialize_nodes(self, node_size=3) -> napari.layers.Points:
+    def _initialize_nodes(self, size) -> napari.layers.Points:
         # node_data = deepcopy(dict(self.skeleton.graph.nodes(data=True)))
         node_data = dict(self.skeleton.graph.nodes(data=True))
 
@@ -906,7 +927,7 @@ class SkeletonViewer:
             layer_name="nodes_coordinates"
         )
 
-        return self.viewer.add_points(node_coordinates, **node_kwargs)
+        return self.viewer.add_points(node_coordinates,size =size,  **node_kwargs)
 
     def _initialize_edges(self, edge_width = 1) -> napari.layers.Shapes:
         # edge_data = deepcopy(list(self.skeleton.graph.edges(data=True)))
@@ -1176,7 +1197,7 @@ class SkeletonViewer:
             self,
             node_index: int,
             image_voxel_size: Tuple[float, float, float] = (1, 1, 1),
-            bounding_box_width: float = 100
+            bounding_box_width: float = 300
     ):
         sub_volume, bounding_box = self.skeleton.sample_image_around_node(
             node_index=node_index,
@@ -1300,7 +1321,7 @@ class SkeletonViewer:
         
         if plot_tips == True:
             self.viewer.add_points(end_point_coordinates,
-                                   size = 5, 
+                                   size = self.node_size, 
                                    face_color='red', 
                                    name = f'tips_of_{start_node}_{end_node}')
         return len(end_points)
@@ -1352,3 +1373,164 @@ class SkeletonViewer:
 
 
 
+
+
+
+class QtImageSliceWidget(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.viewer: napari.Viewer = None
+        self.image_slices: Optional[np.ndarray] = None
+        self.results_table: Optional[pd.DataFrame] = None
+        self.pixel_size_um: float = 5.79
+        self.stain_channeL_names: List[str] = []
+        self.min_slice: int = 0
+        self.max_slice: int = 0
+        self.current_channel_index: int = 0
+
+        # create the slider
+        self.slice_slider = QLabeledSlider(Qt.Orientation.Horizontal)
+        self.slice_slider.setRange(0, 99)
+        self.slice_slider.setSliderPosition(50)
+        self.slice_slider.setSingleStep(1)
+        self.slice_slider.setTickInterval(1)
+        self.slice_slider.valueChanged.connect(self._on_slider_moved)
+
+        #add a "load new edge" button
+        self.load_button = QPushButton("Load New Edge")
+        self.load_button.clicked.connect(self.load_new_image_slices)
+
+        # create the stain channel selection box
+        self.image_selector = QComboBox()
+        self.image_selector.currentIndexChanged.connect(self._update_current_channel)
+
+
+
+        # create the image
+        pg.setConfigOptions(imageAxisOrder="row-major")
+        self.image_widget = pg.ImageView(parent=self)
+
+        # Add a ScatterPlotItem for the red dot in the middle
+        self.red_dot = pg.ScatterPlotItem()
+        self.red_dot.setData([0], [0], pen='r', symbol='+', size=15)
+        self.image_widget.getView().addItem(self.red_dot)
+
+
+
+
+        self.setLayout(QVBoxLayout())
+        self.layout().addWidget(self.load_button)
+        self.layout().addWidget(self.slice_slider)
+        self.layout().addWidget(self.image_selector)
+        self.layout().addWidget(self.image_widget)
+        # self.layout().addWidget(self.plot_widget)
+
+    def _on_slider_moved(self, event=None):
+        self.draw_at_current_slice_index()
+
+    def draw_at_current_slice_index(self):
+        current_slice_index = int(self.slice_slider.value())
+        self.draw_at_slice_index(current_slice_index)
+        # self._update_plot_slice_line(current_slice_index)
+
+    def draw_at_slice_index(self, slice_index: int):
+        self._update_image(slice_index)
+        self._update_red_dot()
+
+    def _update_image(self, slice_index: int):
+        # offset the slice index since we only have a subset of the slices
+        if self.image_slices is None:
+            # if images haven't been set yet, do nothing
+            return
+
+        offset_slice_index = slice_index - self.min_slice
+        image_slice = self.image_slices[self.current_channel_index, offset_slice_index, ...]
+
+        # update the image slice
+        self.image_widget.setImage(image_slice)
+
+
+
+    def _update_red_dot(self):
+        # Update the position of the red dot in the middle
+        image_shape = self.image_slices.shape[2:]  # Assuming shape is (slice, y, x)
+        middle_y, middle_x = image_shape[0] // 2, image_shape[1] // 2
+        self.red_dot.setData([middle_x], [middle_y])
+
+
+
+
+    def set_data(
+            self,
+            stain_image: np.ndarray,
+            results_table: pd.DataFrame,
+            pixel_size_um: float,
+            stain_channel_names: Optional[List[str]]=None,
+    ):
+        if stain_image.ndim == 3:
+            # make sure the image is 4D
+            # (channel, slice, y, x)
+            stain_image = np.expand_dims(stain_image, axis=0)
+        # set the range slider range
+        self.min_slice = results_table["slice_index"].min()
+        self.max_slice = results_table["slice_index"].max()
+        self.slice_slider.setRange(self.min_slice, self.max_slice)
+
+        self.pixel_size_um = pixel_size_um
+        self.image_slices = stain_image
+        self.results_table = results_table
+
+
+
+        # add the image channels
+        if stain_channel_names is not None:
+            self.stain_channeL_names = stain_channel_names
+
+        else:
+            n_channels = stain_image.shape[0]
+            self.stain_channeL_names = [
+                f"channel {channel_index}" for channel_index in range(n_channels)
+            ]
+
+
+        self.image_selector.clear()
+        self.image_selector.addItems(self.stain_channeL_names)
+
+        # refresh the selected channel index and redraw
+        self._update_current_channel()
+
+        self.setVisible(True)
+    
+    def load_new_image_slices(self):
+        highlighted_edge = self.viewer.highlighted_edges
+        start_node = highlighted_edge['start_node'].values[0]
+        end_node = highlighted_edge['end_node'].values[0]
+
+        #eventually move up 
+        slice_width = 300
+        slice_spacing = 5
+        interpolation_order = 1
+        slice_pixel_size = self.viewer.image_voxel_size
+
+        new_image_slices = self.viewer.skeleton.sample_slices_on_edge(
+            image=self.viewer.image,
+            image_voxel_size=self.viewer.image_voxel_size,
+            start_node=start_node,
+            end_node=end_node,
+            slice_width=slice_width,
+            slice_pixel_size=slice_pixel_size,
+            slice_spacing=slice_spacing,
+            interpolation_order=interpolation_order
+        )
+
+        results_table = pd.DataFrame({"slice_index": np.arange(new_image_slices.shape[0])})
+
+        self.set_data(new_image_slices, results_table, 1)
+
+        
+    def _update_current_channel(self, event=None):
+        if len(self.stain_channeL_names) == 0:
+            # don't do anything if there aren't any channels
+            return
+        self.current_channel_index = self.image_selector.currentIndex()
+        self.draw_at_current_slice_index()
