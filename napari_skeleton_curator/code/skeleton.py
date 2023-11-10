@@ -199,7 +199,6 @@ def update_edge_merged_to_last_node(skeleton, new_edge, new_node_index):
     }
     nx.set_edge_attributes(skeleton, {new_edge: new_edge_attributes})
     
-    print(skeleton, new_edge_attributes)
     return skeleton
 
 def add_or_update_shapes_layer(
@@ -445,6 +444,8 @@ def merge_nodes(skeleton: nx.Graph, node_to_keep: int, node_to_merge: int, copy:
     return skeleton
 
 def count_number_of_tips_connected_to_edge(graph, start_node, end_node):
+    #get highlighted edge
+    NODE_COORDINATE_KEY = 'node_coordinate'
     #add start and end node to graph based on breadth first search/distance to origin
     graph_copy = graph.copy()
     graph_copy.remove_edge(start_node, end_node)
@@ -452,6 +453,29 @@ def count_number_of_tips_connected_to_edge(graph, start_node, end_node):
 
     #count number of endpoints
     end_points = []
+    end_point_coordinates = []
+    for node in subtree.nodes:
+        if subtree.degree(node) == 1:
+            end_points.append(node)
+            end_point_coordinates.append(graph_copy.nodes[node][NODE_COORDINATE_KEY])
+    
+    return len(end_points)
+
+#get length of edge
+def path_length(graph, start_node, end_node):
+
+    points = graph[start_node][end_node]['edge_coordinates']
+
+    # Calculate the pairwise differences between consecutive points
+    differences = np.diff(points, axis=0)
+
+    # Calculate the Euclidean distance for each pair of consecutive points
+    distances = np.linalg.norm(differences, axis=1)
+
+    # Sum up the distances to get the total path length
+    total_length = np.sum(distances)
+
+    return total_length
 
 class Skeleton3D:
     def __init__(self, graph: nx.Graph):
