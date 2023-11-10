@@ -3,11 +3,11 @@ from setuptools import setup
 
 
 setup(
-   name='napari-skeleton-curator',
+   name='napari_skeleton_curator',
    version='0.1.0',
    author='Kevin Yamauchi, Malte Mederacke',
    author_email='malte.mederacke@bsse.ethz.ch',
-#    packages=['napari-skeleton-curator'],
+#    packages=['napari_skeleton_curator'],
    scripts=[],
    url='',
    license='LICENSE.txt',
