@@ -33,6 +33,175 @@ EDGE_FEATURES_END_NODE_KEY = "end_node"
 EDGE_FEATURES_HIGHLIGHT_KEY = "highlight"
 
 
+
+def update_edge_merged_to_first_node(skeleton, new_edge, new_node_index):
+    """Clean up an edge that was merged to the start node.
+    
+    This updates the edge coordinates and spline. It adds a line
+    connecting the new node to the merged node in the edge.
+    
+    Parameters
+    ----------
+    skeleton : nx.Graph
+        The skeleton containing the merge edge.
+    new_edge : Tuple[int, int]
+        The edge key for the newly created edge that must be updated.
+    new_node_index : int
+        The index of the new node that was merged into the edge.
+    
+    Returns
+    -------
+    skeleton : nx.Graph
+        The updated graph
+    """
+    print(new_edge, new_node_index)
+    # get the edge attributes
+    edge_attributes = skeleton.edges[new_edge]
+    
+    # update the edge coordinates
+    original_edge_coordinates = edge_attributes["edge_coordinates"]
+    new_node_coordinate = skeleton.nodes(data=True)[new_node_index][NODE_COORDINATE_KEY]
+    
+    if np.linalg.norm(new_node_coordinate - original_edge_coordinates[-1]) > np.linalg.norm(new_node_coordinate - original_edge_coordinates[0]):
+        print("flip oc")
+        original_edge_coordinates = np.flip(original_edge_coordinates, axis = 0)
+    # update the spline
+    n_points = int(np.linalg.norm(new_node_coordinate - original_edge_coordinates[0]))
+    interpolated_coordinates = np.linspace(
+        new_node_coordinate,
+        original_edge_coordinates[0],
+        n_points,
+        endpoint=False
+    )
+    points1 =interpolated_coordinates
+    points2 = original_edge_coordinates
+    start_node = new_node_coordinate
+    old_node = [x for x in new_edge if x != new_node_index][0]
+    middle_node = skeleton.nodes(data=True)[old_node][NODE_COORDINATE_KEY]
+    #start and end node coordinates
+
+
+    if np.allclose(points1[0], start_node) & np.allclose(points2[0], middle_node):
+        print('no flip')
+        spline_points = np.vstack((points1, points2))
+        
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[0], middle_node):
+        print('flip 1')
+        spline_points = np.vstack((np.flip(points1, axis = 0), points2))
+    elif np.allclose(points1[0], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip 2')
+        spline_points = np.vstack((points1, np.flip(points2, axis = 0)))
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip both')
+        spline_points = np.vstack((np.flip(points1, axis = 0), np.flip(points2, axis = 0)))    
+    else:
+        warnings.warn('Warning: Edge splines not connected. Consider recomputing.')
+        spline_points = np.vstack((points1, points2))
+
+    _, idx = np.unique(spline_points, axis=0, return_index=True)
+    spline_points = spline_points[np.sort(idx)]
+
+    new_edge_coordinates = spline_points
+    
+    # new_edge_coordinates = np.concatenate(
+    #     [interpolated_coordinates, original_edge_coordinates]
+    # )
+
+
+    new_spline = Spline3D(points=new_edge_coordinates)
+    
+    # add the edge attributes back
+    new_edge_attributes = {
+        "edge_coordinates": new_edge_coordinates,
+        "edge_spline": new_spline
+    }
+    nx.set_edge_attributes(skeleton, {new_edge: new_edge_attributes})
+    
+    return skeleton
+
+
+def update_edge_merged_to_last_node(skeleton, new_edge, new_node_index):
+    """Clean up an edge that was merged to the end node.
+    
+    This updates the edge coordinates and spline. It adds a line
+    connecting the new node to the merged node in the edge.
+    
+    Parameters
+    ----------
+    skeleton : nx.Graph
+        The skeleton containing the merge edge.
+    new_edge : Tuple[int, int]
+        The edge key for the newly created edge that must be updated.
+    new_node_index : int
+        The index of the new node that was merged into the edge.
+    
+    Returns
+    -------
+    skeleton : nx.Graph
+        The updated graph
+    """
+
+    # get the edge attributes
+    edge_attributes = skeleton.edges[new_edge]
+    
+    # update the edge coordinates
+    original_edge_coordinates = edge_attributes["edge_coordinates"]
+    new_node_coordinate = skeleton.nodes(data=True)[new_node_index][NODE_COORDINATE_KEY]
+    
+    if np.linalg.norm(new_node_coordinate - original_edge_coordinates[-1]) > np.linalg.norm(new_node_coordinate - original_edge_coordinates[0]):
+        print("flip oc")
+        original_edge_coordinates = np.flip(original_edge_coordinates, axis = 0)
+    # update the spline
+    n_points = int(np.linalg.norm(new_node_coordinate - original_edge_coordinates[-1]))
+    interpolated_coordinates = np.linspace(
+        original_edge_coordinates[-1],
+        new_node_coordinate,
+        n_points,
+    )
+    
+    points1 =interpolated_coordinates
+    points2 = original_edge_coordinates
+    start_node = new_node_coordinate
+    old_node = [x for x in new_edge if x != new_node_index][0]
+    middle_node = skeleton.nodes(data=True)[old_node][NODE_COORDINATE_KEY]
+    #start and end node coordinates
+
+
+    if np.allclose(points1[0], start_node) & np.allclose(points2[0], middle_node):
+        print('no flip')
+        spline_points = np.vstack((points1, points2))
+        
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[0], middle_node):
+        print('flip 1')
+        spline_points = np.vstack((np.flip(points1, axis = 0), points2))
+    elif np.allclose(points1[0], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip 2')
+        spline_points = np.vstack((points1, np.flip(points2, axis = 0)))
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip both')
+        spline_points = np.vstack((np.flip(points1, axis = 0), np.flip(points2, axis = 0)))    
+    else:
+        warnings.warn('Warning: Edge splines not connected. Consider recomputing.')
+        spline_points = np.vstack((points1, points2))
+
+    _, idx = np.unique(spline_points, axis=0, return_index=True)
+    spline_points = spline_points[np.sort(idx)]
+
+    new_edge_coordinates = spline_points
+    # new_edge_coordinates = np.concatenate(
+    #     [original_edge_coordinates, interpolated_coordinates[1::]]
+    # )
+    new_spline = Spline3D(points=new_edge_coordinates)
+    # add the edge attributes back
+    new_edge_attributes = {
+        "edge_coordinates": new_edge_coordinates,
+        "edge_spline": new_spline
+    }
+    nx.set_edge_attributes(skeleton, {new_edge: new_edge_attributes})
+    
+    print(skeleton, new_edge_attributes)
+    return skeleton
+
 def add_or_update_shapes_layer(
         viewer: napari.Viewer,
         layer_data_tuple: LayerDataTuple,
@@ -188,7 +357,7 @@ def graph_edges_to_napari(
     }
 
     return (spline_points, shapes_kwargs, "shapes")
-def merge_nodes(skeleton: nx.Graph, node_to_keep: int, node_to_merge: int, copy: bool=False):
+def merge_nodes(skeleton: nx.Graph, node_to_keep: int, node_to_merge: int, copy: bool=True):
     """Merge two nodes in a graph.
     
     Parameters
@@ -229,16 +398,50 @@ def merge_nodes(skeleton: nx.Graph, node_to_keep: int, node_to_merge: int, copy:
         new_edge = tuple(node for node in edge if node != node_to_merge) + (node_to_keep,)
         edges_to_fix.append(new_edge)
         
-    
+    # print(edges_to_fix, skeleton)
     # perform the merge
+    graph_before = skeleton.copy()
     skeleton = nx.contracted_nodes(skeleton, u=node_to_keep, v=node_to_merge, copy=copy)
+
     
     # fix the edges
     for first_node, edge in zip(merge_to_first_node, edges_to_fix):
         if first_node:
             skeleton = update_edge_merged_to_first_node(skeleton, new_edge=edge, new_node_index=node_to_keep)
         else:
+
             skeleton = update_edge_merged_to_last_node(skeleton, new_edge=edge, new_node_index=node_to_keep)
+
+        # #detect all changes
+        # changed_edges = set(graph_before.edges) - set(skeleton.edges)
+        # print(changed_edges)
+        # for edge in changed_edges:
+        #     for node in edge:
+        #         if len(skeleton.edges(node)) == 0:
+        #             skeleton.remove_node(node)
+        #         #merge edges if node has degree 2
+        #         elif len(skeleton.edges(node)) == 2:
+        #             #merge
+        #             print('merge')
+        #             #order of edges to merge is important. Merge incoming edge with outgoing edge
+        #             if list(skeleton.edges(node, data = 'start_node'))[0][2]:
+        #                 new_edge = [None] * 2
+        #                 for u,v,attr in graph.edges(node, data = True):
+        #                     if (u,v) not in edge:
+        #                         if attr['start_node'] == node:
+        #                             new_edge[1] = attr['end_node']
+        #                         if attr['end_node'] == node:
+        #                             new_edge[0] = attr['start_node']
+        #                 Skeleton3D.merge_edge(new_edge[0], node, new_edge[1])
+
+        #             #if no direction, merge however... might lead to funny splines
+        #             else:
+        #                 new_edge = [x for y in list(graph.edges(node)) for x in y if x not in edge]
+        #                 Skeleton3D.merge_edge(new_edge[0], node, new_edge[1])
+
+        # #check if graph is still connected, if not remove orphaned nodes
+        # skeleton.remove_nodes_from(list(nx.isolates(skeleton)))
+
     return skeleton
 
 def count_number_of_tips_connected_to_edge(graph, start_node, end_node):
@@ -602,7 +805,7 @@ class Skeleton3D:
             skeleton=self.graph,
             node_to_keep=node_to_keep,
             node_to_merge=node_to_merge,
-            copy=False
+            copy=True
         )
 
 
@@ -1039,7 +1242,6 @@ class SkeletonViewer:
         if edges_layer is None:
             edges_layer = self.edges_layer
         self._reset_edge_highlight(edges_layer=edges_layer)
-        print(edges_layer)
     
         edge_features = edges_layer.features
         edge_features.loc[
