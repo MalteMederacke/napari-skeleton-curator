@@ -20,7 +20,9 @@ from qtpy.QtCore import Qt
 from qtpy.QtWidgets import QComboBox, QVBoxLayout, QWidget,QPushButton
 from skimage.transform import rotate
 from superqt.sliders import QLabeledSlider
+from scipy.spatial.transform import Rotation as R
 
+import open3d as o3d
 
 
 NODE_COORDINATE_KEY = "node_coordinate"
@@ -32,6 +34,538 @@ EDGE_FEATURES_START_NODE_KEY = "start_node"
 EDGE_FEATURES_END_NODE_KEY = "end_node"
 EDGE_FEATURES_HIGHLIGHT_KEY = "highlight"
 
+
+#code to compute branch angles and orientation
+def unit_vector(vector):
+    """ Returns the unit vector of the vector.  """
+    return np.squeeze(np.asarray(vector / np.linalg.norm(vector)))
+
+
+def ensure_same_normal_direction(normals:dict, reference_direction):
+    """Ensure that all normals have the same direction."""
+    for key, normal in normals.items():
+        if np.sign(normal[0]) != reference_direction:
+            print('flip')
+            normals[key] = -normal  # Reverse the direction of the normal
+    return normals
+
+def compute_level(graph:nx.Graph, origin:int):
+    level_dir = {}
+    for node in graph.nodes():
+        if nx.has_path(graph, origin, node):
+            level = nx.shortest_path_length(graph, origin, node)
+        else:
+            level = -1
+        level_dir[node] = level
+    nx.set_node_attributes(graph, level_dir, 'level')
+
+    #set edge level to level of start node
+    level_dir = {}
+    for u,v,start_node in graph.edges(data= 'start_node'):
+        
+        if start_node != u and start_node != v:
+            start_node = u
+        level = graph.nodes[start_node]['level']
+        level_dir[(u,v)] = level  
+
+    nx.set_edge_attributes(graph, level_dir, 'level')
+
+def compute_start_end_node(graph, origin):
+    for u, v in nx.bfs_edges(graph, origin):
+        d_u = nx.shortest_path_length(graph, origin, u)
+        d_v = nx.shortest_path_length(graph, origin, v)
+        if d_u < d_v:
+            nx.set_edge_attributes(graph, {(u,v): {'start_node': u, 'end_node': v}})
+        else:
+            nx.set_edge_attributes(graph, {(u,v): {'start_node': v, 'end_node': u}})
+
+
+def compute_branch_length(graph):
+    length_dir = {}
+    for u,v in graph.edges():
+        length  = path_length(graph, u,v)
+        length_dir[(u,v)] = length
+    nx.set_edge_attributes(graph, length_dir, 'length')
+
+
+def rotation_matrix_from_vectors(a, b):
+    """
+    Compute the rotation matrix that rotates unit vector a onto unit vector b.
+    
+    Parameters:
+        a (numpy.ndarray): The initial unit vector.
+        b (numpy.ndarray): The target unit vector.
+        
+    Returns:
+        numpy.ndarray: The rotation matrix.
+    """
+    # Compute the cross product and its magnitude
+    v = np.cross(a, b)
+    s = np.linalg.norm(v)
+    
+    # Compute the dot product
+    c = np.dot(a, b)
+    
+    # Skew-symmetric cross-product matrix
+    v_cross = np.array([[0, -v[2], v[1]],
+                        [v[2], 0, -v[0]],
+                        [-v[1], v[0], 0]])
+    
+    # Rotation matrix
+    if s != 0:
+        rm = np.eye(3) + v_cross + np.dot(v_cross, v_cross) * ((1 - c) / (s ** 2))
+    else:
+        rm = np.eye(3)
+    
+    return R.from_matrix(rm)
+
+
+
+def compute_midline_branch_angles(graph:nx.Graph, origin, sample_distance = 0.01):
+    tree = nx.DiGraph(graph)
+    tree.remove_edges_from(tree.edges - nx.bfs_edges(tree, origin))
+
+    # #reorder splines...
+
+
+    mps = []
+    pp = []
+    dps = []
+    center_points = []
+    levels = []
+    angles = []
+    daughter_edge =[]
+    numTips = []
+    angle_dict = {}
+    for edge in tree.edges:
+        if len(tree.out_edges(edge[1])) != 2:
+            continue
+        spline = tree.edges[edge]['edge_spline']
+        parent_ps = []
+        for i in [1,5,10]:
+            parent_p = spline.sample(1-sample_distance*i)[0]
+            parent_ps.append(parent_p)
+        parent_p = np.mean(parent_ps, axis = 0)
+
+        center_point = tree.nodes[edge[1]]['node_coordinate']
+        mp_vector = -unit_vector(parent_p - center_point)
+
+        if tree.edges[edge]['level'] <8:
+            mps.append(center_point +(70*mp_vector))
+            center_points.append(center_point)
+            pp.append(parent_p)
+
+
+        # mp_vector = unit_vector(mp_vector)
+        # skeleton_viewer.viewer.add_shapes([center_point, midline_point], shape_type = 'path', edge_width = 10, face_color = 'red')
+        for daughter_node in tree.successors(edge[1]):
+            daughter = (edge[1], daughter_node)
+            level  = tree.edges[daughter]['level']
+            daughter_spline = tree.edges[daughter]['edge_spline']
+            daughter_vector = daughter_spline.sample(sample_distance*5)[0] - center_point
+            daughter_vector = unit_vector(daughter_vector)
+            dps.append(center_point+(30*daughter_vector))
+            dot = np.dot(mp_vector, daughter_vector)
+            # norm = np.linalg.norm(mp_vector) * np.linalg.norm(daughter_vector)
+            angle = np.degrees(np.arccos(dot))
+
+            daughter_edge.append(daughter_spline.points)
+            levels.append(level)
+            angles.append(angle)
+            numTips.append(count_number_of_tips_connected_to_edge(tree, edge[1], daughter_node))
+
+            angle_dict[daughter] = angle
+
+    angle_df = pd.DataFrame({'level': levels, 'angle': angles, 'edge': list(angle_dict.keys()), 'num_tips': numTips})
+    return angle_df, mps, center_points, pp,dps,daughter_edge
+             
+def compute_branch_orientation(graph:nx.Graph, origin:int) -> pd.DataFrame:
+    """Computes in which orienation branch points (Nodes with degree 3) are oriented.
+      Compare with trachea orientation to determine if branches are oriented in the same direction.
+
+    Parameters
+    ----------
+    graph : nx.Graph
+        Branching tree formatted as directonal graph with trachea as origin
+    origin : int
+        Node ID of origin
+
+    Returns
+    -------
+    pd.DataFrame
+        Dataframe with branch orientation and level
+    """
+    normals_branches = {}
+    level_dic = {}
+
+    tree = nx.DiGraph(graph)
+    tree.remove_edges_from(tree.edges - nx.bfs_edges(tree, origin))
+
+    # normals_to_plot_non_rot = []
+    parent_tangent_dic = {}
+    # normals_non_rot = {}
+    # rotation = []
+    for edge in tree.edges():
+        if len(tree.out_edges(edge[1])) != 2:
+            continue
+        p_branch  = tree.nodes[edge[1]]['node_coordinate']
+        parent_spline = tree.edges[edge]['edge_spline']
+        p_parent = parent_spline.sample(0.9)[0]
+        p_daughters = []
+        for daughter_node in tree.successors(edge[1]):
+            daughter = (edge[1], daughter_node)
+            spline_daughter = tree.edges[daughter]['edge_spline']
+
+            #sample a couple of points and take avarage
+            dp = []
+            for sample_distance in np.linspace(0.1,0.9, 20):
+                dp.append(spline_daughter.sample(sample_distance)[0])
+            # p_daughters.append(np.mean(dp, axis = 0))
+            p_daughters.append(tree.nodes[daughter_node]['node_coordinate'])
+        
+        #compute vectors
+        v1 = p_daughters[0] - p_parent
+        v2 = p_daughters[1] - p_parent
+        normal = np.cross(v1,v2)
+        normal = unit_vector(normal)
+        
+
+        parent_tangent = p_parent - p_branch
+        parent_tangent = unit_vector(parent_tangent)
+        parent_tangent_dic[edge[1]] = parent_tangent
+        # normals_non_rot[edge[1]] = normal
+
+        normals_branches[edge[1]] = normal
+        level_dic[edge[1]] = tree.nodes[edge[1]]['level']
+    
+    trachea_normal =normals_branches[list(tree.out_edges(origin))[0][1]]
+    normals_branches_ordered  = ensure_same_normal_direction(normals_branches, np.sign(trachea_normal[0]))
+    # normals_non_rot  = ensure_same_normal_direction(normals_non_rot, np.sign(trachea_normal[0]))
+
+    #rotate normals
+    # axis_to_rotate_to = np.array([0,1,1])
+    # for node, normal in normals_branches_ordered.items():
+    #     parent_tangent = parent_tangent_dic[node]
+    #     tangent_rm = rotation_matrix_from_vectors(parent_tangent, 
+    #                                         unit_vector(parent_tangent *axis_to_rotate_to))
+    #     normal_rot = tangent_rm.apply(normal)
+    #     normals_branches_ordered[node] = normal_rot
+
+    #if normals need to be plotted
+    normals_to_plot = {}
+    for node, normal in normals_branches_ordered.items():
+        normals_to_plot[node] = np.array([tree.nodes[node]['node_coordinate'], tree.nodes[node]['node_coordinate'] + 70*normal])
+    # for node, normal in normals_non_rot.items():
+    #     normals_to_plot_non_rot.append(np.array([tree.nodes[node]['node_coordinate'], tree.nodes[node]['node_coordinate'] + 70*normal]))
+
+    #compare angle between trachea and branches
+    # angles = []
+    # levels = []
+    # nodes = []
+    # for node, normal in normals_branches_ordered.items():
+    #     dot = np.dot(trachea_normal, normal)
+    #     # norm = np.linalg.norm(trachea_normal) * np.linalg.norm(normal)
+    #     # print(norm)
+    #     levels.append(level_dic[node])
+    #     angle = np.degrees(np.arccos(dot))
+    #     angles.append(angle)
+    #     nodes.append(node)
+
+
+    #compare angle between parent and branch
+    angles = []
+    nodes = []
+    levels = []
+    for node, normal in normals_branches_ordered.items():
+        parent = list(tree.in_edges(node))[0][0]
+        
+        if parent == origin:
+            continue
+        if parent not in list(normals_branches_ordered.keys()):
+            continue
+        parent_normal = unit_vector(normals_branches_ordered[parent])
+        normal = unit_vector(normal)
+        dot = np.dot(parent_normal, normal)
+        
+        angle = np.degrees(np.arccos(dot))
+        angles.append(angle)
+        # level_dic[node] = tree.nodes[node]['level']
+        levels.append(level_dic[node])
+        nodes.append(node)
+
+    angle_df = pd.DataFrame({'angle': angles, 'level': levels, 'node': nodes})
+
+    return angle_df,normals_branches_ordered,normals_to_plot
+
+def count_branch_orientation_changes(graph, origin, angle_df, change_cut_off = 50):
+    #check how often orientation changes per branch sequence.
+    #get branch sequence
+    branch_sequences = []
+    for node, degree in graph.degree():
+        if degree != 1:
+            continue
+        shortest_path = nx.shortest_path(graph, origin, node)
+        if len(shortest_path) > 0:
+            branch_sequences.append(shortest_path)
+
+
+    angle_sequences = []
+    path_level = []
+    nodes = []
+    for branch_sequence in branch_sequences:
+        angle_sequence = []
+        distance_from_origin = []
+        nodes_in_path = []
+
+        for node in branch_sequence:
+            if node in list(angle_df['node']):
+                # print(node, angles[angles['node'] == node]['angle'].values[0])
+                angle_sequence.append(angle_df[angle_df['node'] == node]['angle'].values[0])
+
+                distance_from_origin.append(graph.nodes[node]['level'])
+                nodes_in_path.append(int(node))
+        angle_sequences.append(angle_sequence)
+        path_level.append(distance_from_origin)
+        nodes.append(nodes_in_path)
+
+    for i, angle_sequence in enumerate(angle_sequences):
+        path_df = pd.DataFrame({'angle': angle_sequence, 'distance_from_origin': path_level[i], 'nodes': nodes[i]})
+        #change distance and node to int
+        path_df['distance_from_origin'] = path_df['distance_from_origin'].astype(int)
+        path_df['nodes'] = path_df['nodes'].astype(int)
+        path_df['path'] = int(i)
+        if i == 0:
+            angle_sequence_df = path_df
+        else:
+            angle_sequence_df = pd.concat([angle_sequence_df, path_df])
+
+        #count how often the anlge changes by more than 33 degrees
+    # angle_sequence_df['angle_change'] = angle_sequence_df.groupby('path')['angle'].diff()
+    angle_sequence_df['angle_change'] = angle_sequence_df['angle']
+    angle_sequence_df['angle_change'] = angle_sequence_df['angle_change'].abs()
+    angle_sequence_df['angle_change_binary'] = (angle_sequence_df['angle_change'] > change_cut_off) & (angle_sequence_df['angle_change'] < 180 - change_cut_off)
+    path_count_angle_changes =angle_sequence_df.groupby('path')['angle_change_binary'].sum()
+    path_count_angle_changes = path_count_angle_changes.reset_index(name ='num_orientation_changes')
+
+    return path_count_angle_changes, angle_sequence_df
+
+
+
+def compute_dimension_of_lobes(graph, lobe):
+    #get all edges of lobe
+    lobe_edges = [edge for edge in graph.edges(data = True) if edge[2].get('lobe') == lobe]
+    lobe_coord = [edge[2]['edge_coordinates'] for edge in lobe_edges]
+    #flatten
+    lobe_coord_flat = np.array([x for y in lobe_coord for x in y])
+
+    #compute alpha shapes
+    pcd = o3d.geometry.PointCloud()
+    pcd.points = o3d.utility.Vector3dVector(lobe_coord_flat)
+    alpha = 300
+    mesh= o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, alpha = alpha)
+    mesh.compute_vertex_normals()
+
+    #sample n points from surface
+    n_points = 100000
+    points = mesh.sample_points_uniformly(number_of_points = n_points)
+    m, cov = points.compute_mean_and_covariance()
+    eigenvalues, eigenvectors = np.linalg.eig(cov)
+
+    #get principal axis
+    principal_axis = eigenvectors[np.argmax(eigenvalues)]
+    #get major and minor axis length
+    # Sort eigenvectors based on eigenvalues
+    sorted_indices = np.argsort(eigenvalues)[::-1]
+    sorted_eigenvectors = eigenvectors[:, sorted_indices]
+
+    # Compute the lengths of the major and minor axes
+    major_length = np.sqrt(eigenvalues[sorted_indices[0]])
+    minor_length = np.sqrt(eigenvalues[sorted_indices[-1]])
+
+    major_axis = sorted_eigenvectors[:, 0] 
+    minor_axis = sorted_eigenvectors[:, -1]
+
+    #compute length along major and minor axis
+    vertices = np.array(points.points)
+    projected_distances_major = np.dot(vertices,major_axis)
+    min_distance = np.min(projected_distances_major)
+    max_distance = np.max(projected_distances_major)
+    major_axis_length = max_distance - min_distance
+
+    projected_distances_minor = np.dot(vertices,minor_axis)
+    min_distance = np.min(projected_distances_minor)
+    max_distance = np.max(projected_distances_minor)
+    minor_axis_length = max_distance - min_distance
+
+    return major_axis_length, minor_axis_length, mesh
+
+
+def update_edge_merged_to_first_node(skeleton, new_edge, new_node_index):
+    """Clean up an edge that was merged to the start node.
+    
+    This updates the edge coordinates and spline. It adds a line
+    connecting the new node to the merged node in the edge.
+    
+    Parameters
+    ----------
+    skeleton : nx.Graph
+        The skeleton containing the merge edge.
+    new_edge : Tuple[int, int]
+        The edge key for the newly created edge that must be updated.
+    new_node_index : int
+        The index of the new node that was merged into the edge.
+    
+    Returns
+    -------
+    skeleton : nx.Graph
+        The updated graph
+    """
+    print(new_edge, new_node_index)
+    # get the edge attributes
+    edge_attributes = skeleton.edges[new_edge]
+    
+    # update the edge coordinates
+    original_edge_coordinates = edge_attributes["edge_coordinates"]
+    new_node_coordinate = skeleton.nodes(data=True)[new_node_index][NODE_COORDINATE_KEY]
+    
+    if np.linalg.norm(new_node_coordinate - original_edge_coordinates[-1]) > np.linalg.norm(new_node_coordinate - original_edge_coordinates[0]):
+        print("flip oc")
+        original_edge_coordinates = np.flip(original_edge_coordinates, axis = 0)
+    # update the spline
+    n_points = int(np.linalg.norm(new_node_coordinate - original_edge_coordinates[0]))
+    interpolated_coordinates = np.linspace(
+        new_node_coordinate,
+        original_edge_coordinates[0],
+        n_points,
+        endpoint=False
+    )
+    points1 =interpolated_coordinates
+    points2 = original_edge_coordinates
+    start_node = new_node_coordinate
+    old_node = [x for x in new_edge if x != new_node_index][0]
+    middle_node = skeleton.nodes(data=True)[old_node][NODE_COORDINATE_KEY]
+    #start and end node coordinates
+
+
+    if np.allclose(points1[0], start_node) & np.allclose(points2[0], middle_node):
+        print('no flip')
+        spline_points = np.vstack((points1, points2))
+        
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[0], middle_node):
+        print('flip 1')
+        spline_points = np.vstack((np.flip(points1, axis = 0), points2))
+    elif np.allclose(points1[0], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip 2')
+        spline_points = np.vstack((points1, np.flip(points2, axis = 0)))
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip both')
+        spline_points = np.vstack((np.flip(points1, axis = 0), np.flip(points2, axis = 0)))    
+    else:
+        warnings.warn('Warning: Edge splines not connected. Consider recomputing.')
+        spline_points = np.vstack((points1, points2))
+
+    _, idx = np.unique(spline_points, axis=0, return_index=True)
+    spline_points = spline_points[np.sort(idx)]
+
+    new_edge_coordinates = spline_points
+    
+    # new_edge_coordinates = np.concatenate(
+    #     [interpolated_coordinates, original_edge_coordinates]
+    # )
+
+
+    new_spline = Spline3D(points=new_edge_coordinates)
+    
+    # add the edge attributes back
+    new_edge_attributes = {
+        "edge_coordinates": new_edge_coordinates,
+        "edge_spline": new_spline
+    }
+    nx.set_edge_attributes(skeleton, {new_edge: new_edge_attributes})
+    
+    return skeleton
+
+
+def update_edge_merged_to_last_node(skeleton, new_edge, new_node_index):
+    """Clean up an edge that was merged to the end node.
+    
+    This updates the edge coordinates and spline. It adds a line
+    connecting the new node to the merged node in the edge.
+    
+    Parameters
+    ----------
+    skeleton : nx.Graph
+        The skeleton containing the merge edge.
+    new_edge : Tuple[int, int]
+        The edge key for the newly created edge that must be updated.
+    new_node_index : int
+        The index of the new node that was merged into the edge.
+    
+    Returns
+    -------
+    skeleton : nx.Graph
+        The updated graph
+    """
+
+    # get the edge attributes
+    edge_attributes = skeleton.edges[new_edge]
+    
+    # update the edge coordinates
+    original_edge_coordinates = edge_attributes["edge_coordinates"]
+    new_node_coordinate = skeleton.nodes(data=True)[new_node_index][NODE_COORDINATE_KEY]
+    
+    if np.linalg.norm(new_node_coordinate - original_edge_coordinates[-1]) > np.linalg.norm(new_node_coordinate - original_edge_coordinates[0]):
+        print("flip oc")
+        original_edge_coordinates = np.flip(original_edge_coordinates, axis = 0)
+    # update the spline
+    n_points = int(np.linalg.norm(new_node_coordinate - original_edge_coordinates[-1]))
+    interpolated_coordinates = np.linspace(
+        original_edge_coordinates[-1],
+        new_node_coordinate,
+        n_points,
+    )
+    
+    points1 =interpolated_coordinates
+    points2 = original_edge_coordinates
+    start_node = new_node_coordinate
+    old_node = [x for x in new_edge if x != new_node_index][0]
+    middle_node = skeleton.nodes(data=True)[old_node][NODE_COORDINATE_KEY]
+    #start and end node coordinates
+
+
+    if np.allclose(points1[0], start_node) & np.allclose(points2[0], middle_node):
+        print('no flip')
+        spline_points = np.vstack((points1, points2))
+        
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[0], middle_node):
+        print('flip 1')
+        spline_points = np.vstack((np.flip(points1, axis = 0), points2))
+    elif np.allclose(points1[0], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip 2')
+        spline_points = np.vstack((points1, np.flip(points2, axis = 0)))
+    elif np.allclose(points1[-1], start_node) & np.allclose(points2[-1], middle_node):
+        print('flip both')
+        spline_points = np.vstack((np.flip(points1, axis = 0), np.flip(points2, axis = 0)))    
+    else:
+        warnings.warn('Warning: Edge splines not connected. Consider recomputing.')
+        spline_points = np.vstack((points1, points2))
+
+    _, idx = np.unique(spline_points, axis=0, return_index=True)
+    spline_points = spline_points[np.sort(idx)]
+
+    new_edge_coordinates = spline_points
+    # new_edge_coordinates = np.concatenate(
+    #     [original_edge_coordinates, interpolated_coordinates[1::]]
+    # )
+    new_spline = Spline3D(points=new_edge_coordinates)
+    # add the edge attributes back
+    new_edge_attributes = {
+        "edge_coordinates": new_edge_coordinates,
+        "edge_spline": new_spline
+    }
+    nx.set_edge_attributes(skeleton, {new_edge: new_edge_attributes})
+    
+    return skeleton
 
 def add_or_update_shapes_layer(
         viewer: napari.Viewer,
@@ -188,7 +722,7 @@ def graph_edges_to_napari(
     }
 
     return (spline_points, shapes_kwargs, "shapes")
-def merge_nodes(skeleton: nx.Graph, node_to_keep: int, node_to_merge: int, copy: bool=False):
+def merge_nodes(skeleton: nx.Graph, node_to_keep: int, node_to_merge: int, copy: bool=True):
     """Merge two nodes in a graph.
     
     Parameters
@@ -229,26 +763,91 @@ def merge_nodes(skeleton: nx.Graph, node_to_keep: int, node_to_merge: int, copy:
         new_edge = tuple(node for node in edge if node != node_to_merge) + (node_to_keep,)
         edges_to_fix.append(new_edge)
         
-    
+    # print(edges_to_fix, skeleton)
     # perform the merge
+    graph_before = skeleton.copy()
     skeleton = nx.contracted_nodes(skeleton, u=node_to_keep, v=node_to_merge, copy=copy)
+
     
     # fix the edges
     for first_node, edge in zip(merge_to_first_node, edges_to_fix):
         if first_node:
             skeleton = update_edge_merged_to_first_node(skeleton, new_edge=edge, new_node_index=node_to_keep)
         else:
+
             skeleton = update_edge_merged_to_last_node(skeleton, new_edge=edge, new_node_index=node_to_keep)
+
+        # #detect all changes
+        # changed_edges = set(graph_before.edges) - set(skeleton.edges)
+        # print(changed_edges)
+        # for edge in changed_edges:
+        #     for node in edge:
+        #         if len(skeleton.edges(node)) == 0:
+        #             skeleton.remove_node(node)
+        #         #merge edges if node has degree 2
+        #         elif len(skeleton.edges(node)) == 2:
+        #             #merge
+        #             print('merge')
+        #             #order of edges to merge is important. Merge incoming edge with outgoing edge
+        #             if list(skeleton.edges(node, data = 'start_node'))[0][2]:
+        #                 new_edge = [None] * 2
+        #                 for u,v,attr in graph.edges(node, data = True):
+        #                     if (u,v) not in edge:
+        #                         if attr['start_node'] == node:
+        #                             new_edge[1] = attr['end_node']
+        #                         if attr['end_node'] == node:
+        #                             new_edge[0] = attr['start_node']
+        #                 Skeleton3D.merge_edge(new_edge[0], node, new_edge[1])
+
+        #             #if no direction, merge however... might lead to funny splines
+        #             else:
+        #                 new_edge = [x for y in list(graph.edges(node)) for x in y if x not in edge]
+        #                 Skeleton3D.merge_edge(new_edge[0], node, new_edge[1])
+
+        # #check if graph is still connected, if not remove orphaned nodes
+        # skeleton.remove_nodes_from(list(nx.isolates(skeleton)))
+
     return skeleton
 
 def count_number_of_tips_connected_to_edge(graph, start_node, end_node):
-    #add start and end node to graph based on breadth first search/distance to origin
-    graph_copy = graph.copy()
-    graph_copy.remove_edge(start_node, end_node)
-    subtree = nx.bfs_tree(graph_copy, end_node)
+    # Get highlighted edge
+    NODE_COORDINATE_KEY = 'node_coordinate'
+    
+    #generate diGraph
+    if type(graph) != nx.DiGraph:
+        graph = nx.DiGraph(graph)
+        graph.remove_edges_from(graph.edges - nx.bfs_edges(graph, start_node))
 
-    #count number of endpoints
-    end_points = []
+
+    # Perform a breadth-first search starting from the end_node
+    subtree = nx.bfs_tree(graph, end_node)
+    
+    # Initialize count of endpoints
+    num_endpoints = 0
+    
+    # Iterate through nodes in the subtree
+    for node in subtree.nodes:
+        # Check if the node is a leaf node (degree 1) and is not the start_node
+        if subtree.degree(node) == 1 and node != start_node:
+            num_endpoints += 1
+            
+    return num_endpoints
+
+#get length of edge
+def path_length(graph, start_node, end_node):
+
+    points = graph[start_node][end_node]['edge_coordinates']
+
+    # Calculate the pairwise differences between consecutive points
+    differences = np.diff(points, axis=0)
+
+    # Calculate the Euclidean distance for each pair of consecutive points
+    distances = np.linalg.norm(differences, axis=1)
+
+    # Sum up the distances to get the total path length
+    total_length = np.sum(distances)
+
+    return total_length
 
 class Skeleton3D:
     def __init__(self, graph: nx.Graph):
@@ -462,9 +1061,23 @@ class Skeleton3D:
                     _, idx = np.unique(coordinates, axis=0, return_index=True)
                     coordinates = coordinates[np.sort(idx)]
                 # print(coordinate.shape, coordinate.dtype,'no dir')
+            # print(len(coordinates))
+                    
+
+            if len(coordinates) <= 3:
+                #add a point in the middle... NOT PRETTY
+                print(f"Warning: Edge {start_index}{end_index} has less than 3 points. Adding a point in the middle.")
+                coordinates = np.insert(coordinates, -1,coordinates[-1]-0.1, axis = 0)
+                if len(coordinates) <=3:
+                    coordinates = np.insert(coordinates, -1,coordinates[-1]-0.01, axis = 0)
+                print('new length', len(coordinates))
+
+            if np.unique(coordinates, axis=0).shape[0] != coordinates.shape[0]:
+                _, unique_indices = np.unique(coordinates, axis=0, return_index=True)
+                coordinates = coordinates[unique_indices]
+
 
             spline = Spline3D(points=coordinates)
-
 
             parsed_edge_attributes.update(
                 {
@@ -602,7 +1215,7 @@ class Skeleton3D:
             skeleton=self.graph,
             node_to_keep=node_to_keep,
             node_to_merge=node_to_merge,
-            copy=False
+            copy=True
         )
 
 
@@ -875,7 +1488,7 @@ class SkeletonViewer:
 
         # add widget for plot the image around sliced edge
         image_slice_widget = QtImageSliceWidget()
-        image_slice_widget.viewer = self
+        image_slice_widget.viewer = self.viewer
         self.viewer.window.add_dock_widget(image_slice_widget, area='right')
 
         # add the widget for slicing edges
@@ -1039,7 +1652,6 @@ class SkeletonViewer:
         if edges_layer is None:
             edges_layer = self.edges_layer
         self._reset_edge_highlight(edges_layer=edges_layer)
-        print(edges_layer)
     
         edge_features = edges_layer.features
         edge_features.loc[
@@ -1092,6 +1704,8 @@ class SkeletonViewer:
             edge_indices = []
 
         self.highlight_edges_by_index(edge_indices=edge_indices, edges_layer=edges_layer)
+
+ 
 
     def edge_indices_from_nodes(self, edge_list: List[Tuple[int, int]]) -> List[int]:
         edge_features = self.edges_layer.features
@@ -1249,7 +1863,7 @@ class SkeletonViewer:
         # redraw
         self.update()
 
-    def delete_edge(self):
+    def delete_edge(self, update:bool = True):
         """delete highlighted edge. MALTE"""
 
         
@@ -1295,8 +1909,8 @@ class SkeletonViewer:
         self.skeleton.graph.remove_nodes_from(list(nx.isolates(self.skeleton.graph)))
         
  
-
-        self.update()
+        if update: 
+            self.update()
     
     def count_number_of_tips_connected_to_edge(self, plot_tips:bool= True):
         #get highlighted edge
@@ -1321,7 +1935,7 @@ class SkeletonViewer:
         
         if plot_tips == True:
             self.viewer.add_points(end_point_coordinates,
-                                   size = self.node_size, 
+                                   size = self.node_size[0], 
                                    face_color='red', 
                                    name = f'tips_of_{start_node}_{end_node}')
         return len(end_points)

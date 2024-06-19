@@ -9,6 +9,9 @@ Tooling includes:
 - compare with original image
 - remove nodes
 - remove edges
+- measure length of edges
+- measure angles between edges
+- quantify lobe dimensions
 - export image along edges
 
 
