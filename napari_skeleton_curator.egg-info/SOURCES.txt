@@ -3,11 +3,13 @@ README.txt
 requirements.txt
 setup.py
 napari_skeleton_curator/__init__.py
+napari_skeleton_curator/measurements.py
+napari_skeleton_curator/skeleton.py
+napari_skeleton_curator/utils.py
 napari_skeleton_curator.egg-info/PKG-INFO
 napari_skeleton_curator.egg-info/SOURCES.txt
 napari_skeleton_curator.egg-info/dependency_links.txt
 napari_skeleton_curator.egg-info/requires.txt
 napari_skeleton_curator.egg-info/top_level.txt
-napari_skeleton_curator/code/__init__.py
-napari_skeleton_curator/code/skeleton.py
-napari_skeleton_curator/examples/skeleton_merge_nodes.ipynb
+tests/test_measurements.py
+tests/test_skeleton.py

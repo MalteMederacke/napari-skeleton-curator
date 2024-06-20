@@ -21,7 +21,7 @@ from qtpy.QtWidgets import QComboBox, QVBoxLayout, QWidget,QPushButton
 from skimage.transform import rotate
 from superqt.sliders import QLabeledSlider
 from scipy.spatial.transform import Rotation as R
-from utils import (unit_vector, 
+from .utils import (unit_vector, 
                    ensure_same_normal_direction, 
                    count_number_of_tips_connected_to_edge)
 
