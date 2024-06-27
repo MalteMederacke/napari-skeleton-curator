@@ -8,139 +8,274 @@ from .utils import (unit_vector,
                    ensure_same_normal_direction, 
                    count_number_of_tips_connected_to_edge)
 import open3d as o3d
+from .skeleton import compute_start_end_node
 
-def compute_midline_branch_angles(graph:nx.Graph, 
-                                  origin:int, 
-                                  sample_distance:float = 0.01):
-    
-    """Compute the angles between the midline and the daughter branches.
-    Commonly called theta.
+def compute_midline_branch_angles(graph:nx.Graph, origin:int, sample_distance:float=0.01):
 
-    Parameters
-    ----------
-    graph : nx.Graph
-        Branching tree with branch coordinates stored in edge_spline,
-        and node coordinates stored in node_coordinate
-        generation of the edge stored in level
-    origin : int
-        inlet of the graph, usually the trachea
-    sample_distance : float, optional
-        Position on where to sample the spline to compute the midline.
-          Relative, (1 is on the opposite end of the branch, 
-          0 is at the branch point),
-            by default 0.01
+    """Computes the midline anlges for each branch in the graph and returns
+    a dataframe with the angles and all metadata in the tree.
+
+    Points are equal distantly sampled along each parent branch and the inverse
+    mean vector is considered as the midline. Then the mean vector from the branch
+    is taken and the minimal angle between these two computed. To compute
+    the angle based on the branch nodes, see function "compute_midline_branch_angle_branch_nodes"
 
     Returns
     -------
-    pd.DataFrame
-        pd.DataFrame with the angles between the midline and the
-          daughter branches and associated information
-    list
-        List of midline points for visualization
-    list
-        List of center points for visualization
-    list
-        List of parent points for visualization
-    list
-        List of daughter points for visualization
-    list
-        List of daughter edges for visualization
-
+    pd.Dataframe
+        Dataframe containing midline angle measurements and all other edge data
 
     Raises
     ------
     ValueError
-        If the midline vector is not normalized
+        Raises and error if the end point of the parent branch and the 
+        start point of the daughter branch are not the same
     ValueError
-        If the daughter vector is not normalized
+        Raises and error if the length of the midline vector is != 1
+    ValueError
+        Raises and error if the length of the branch vector is != 1
+
     """
-    
-    #compute directed graph
+
     tree = nx.DiGraph(graph)
     tree.remove_edges_from(tree.edges - nx.bfs_edges(tree, origin))
 
+    compute_start_end_node(tree, origin)
 
-    mps = []
-    pp = []
-    dps = []
-    center_points = []
-    levels = []
-    angles = []
-    daughter_edge =[]
-    numTips = []
     angle_dict = {}
+    start_nodes = nx.get_edge_attributes(tree, 'start_node')
+    end_nodes = nx.get_edge_attributes(tree, 'end_node')
+    splines = nx.get_edge_attributes(tree, 'edge_spline')
 
-    #angle only needed for branch with two daughters
-    for edge in tree.edges:
+    node_coordinates =nx.get_node_attributes(tree, 'node_coordinate')
+
+    attr_dict = {}
+    center_points = []
+    midline_points = []
+
+    for u,v,attr in tree.edges(data = True):
+        edge = (u,v)
         if len(tree.out_edges(edge[1])) != 2:
             continue
-        #get the parent spline
-        spline = tree.edges[edge]['edge_spline']
-        #sample at a couple of different distances on the parent edge 
-        # to account for local curvature
+        
+        #continue if no parent edge (eg. trachea)
+        if not tree.in_edges(start_nodes[edge]):
+            # angle_dict[edge] = 0
+            attr_dict[edge] = attr
+
+            attr_dict[edge]['edge'] = edge
+     
+            continue
+        parent_edge = list(tree.in_edges(start_nodes[edge]))[0]
+        parent_spline = splines[parent_edge]
+
         parent_ps = []
-        for i in [1,5,10]:
-            parent_p = spline.sample(1-sample_distance*i)[0]
+        #sampling along the whole spline
+        i = sample_distance
+        while i <1- sample_distance:
+            parent_p = parent_spline.sample(i)[0]
             parent_ps.append(parent_p)
+            i += sample_distance
         #take the average of the sampled points
-        parent_p = np.mean(parent_ps, axis = 0)
-
-        #center point of the three branches of interest
-        center_point = tree.nodes[edge[1]]['node_coordinate']
-
-        #get the midline vector
-        mp_vector = - unit_vector(parent_p - center_point)
-
-        #store midline points and center points for visualization
-        if tree.edges[edge]['level'] <10:
-            mps.append(center_point +(10*mp_vector))
-            center_points.append(center_point)
-            pp.append(parent_p)
-
-        #measure the angle between the midline and the daughter branches
-        for daughter_node in tree.successors(edge[1]):
-            daughter = (edge[1], daughter_node)
-            level  = tree.edges[daughter]['level']
-            daughter_spline = tree.edges[daughter]['edge_spline']
-            #sample three points on the daughter branch to account for local curvature
-            daughter_ps = []
-            for i in [1,5,10]:
-                daughter_point = daughter_spline.sample(sample_distance*i)[0]
-                daughter_ps.append(daughter_point)
-            daughter_point = np.mean(daughter_ps, axis = 0)
-            #get the vector of the daughter branch
-            daughter_vector = daughter_point - center_point
-            daughter_vector = unit_vector(daughter_vector)
-            #store daughter points for visualization
-            dps.append(center_point+(10*daughter_vector))
-
-            #used unit vectors or normalize
-            # throw error if length of vector != 1
-            if np.linalg.norm(mp_vector) != 1:
-                raise ValueError('Midline vector is not normalized')
-            if np.linalg.norm(daughter_vector) != 1:
-                raise ValueError('Daughter vector is not normalized')
-            
-            #compute the angle between the midline and the daughter branch
-            dot = np.dot(mp_vector, daughter_vector)
-            angle = np.degrees(np.arccos(dot))
-
-            #store the angle, level and edge
-            daughter_edge.append(daughter_spline.points)
-            levels.append(level)
-            angles.append(angle)
-            numTips.append(count_number_of_tips_connected_to_edge(tree, edge[1], daughter_node))
-
-            angle_dict[daughter] = angle
-
-    #create a dataframe with the angles and associated information
-    angle_df = pd.DataFrame({'level': levels, 
-                             'angle': angles, 
-                             'edge': list(angle_dict.keys()), 
-                             'num_tips': numTips})
+        parent_point = np.nanmean(parent_ps, axis = 0)
     
-    return angle_df, mps, center_points, pp,dps,daughter_edge
-             
+        # parent_start_node_coordinates = node_coordinates[start_nodes[parent_edge]]
+        parent_end_node_coordinates = node_coordinates[end_nodes[parent_edge]]
+
+        parent_vector = unit_vector(parent_point - parent_end_node_coordinates)
+        midline_vector = -parent_vector
+
+        #same for edge
+        start_node_coordinates = node_coordinates[start_nodes[edge]]
+
+        if np.all(parent_end_node_coordinates != start_node_coordinates):
+            raise ValueError('Branch point ill defined.')
+
+        spline = splines[edge]
+        edge_ps = []
+        i = sample_distance
+        while i < 1-sample_distance:
+            edge_p = spline.sample(i)[0]
+            edge_ps.append(edge_p)
+            i+= sample_distance
+
+        edge_point = np.nanmean(edge_ps, axis =0)
+        
+        branch_vector = unit_vector(edge_point - start_node_coordinates)
+
+        if round(np.linalg.norm(midline_vector)) != 1:
+            raise ValueError('Midline vector is not normalized. Its length is {}'.format(np.linalg.norm(midline_vector)))
+        if round(np.linalg.norm(branch_vector)) != 1:
+            raise ValueError('Branch vector is not normalized. Its length is {}'.format(np.linalg.norm(branch_vector)))
+
+
+        dot = np.dot(midline_vector, branch_vector)
+        angle = np.degrees(np.arccos(dot))
+
+        angle_dict[edge] = angle
+        attr_dict[edge] = attr
+        attr_dict[edge]['angle'] = angle
+        attr_dict[edge]['edge'] = edge
+        
+        #store for viz
+        center_points.append(parent_end_node_coordinates)
+        midline_points.append(parent_end_node_coordinates + (10 * midline_vector))
+
+
+
+    angle_df = pd.DataFrame.from_dict(attr_dict, orient ='index').reset_index(drop=True)
+        
+    
+    return angle_df, center_points, midline_points
+
+
+
+def compute_midline_branch_angle_branch_nodes(graph:nx.digraph, origin:int):
+
+    """Computes the midline anlges for each branch in the graph and returns
+    a dataframe with the angles and all metadata in the tree.
+
+    To compute the vectors, only the branch nodes are taken in consideration.
+    Branches are simplified to a straight line
+    Returns
+    -------
+    pd.Dataframe
+        Dataframe containing midline angle measurements and all other edge data
+
+    Raises
+    ------
+    ValueError
+        Raises and error if the end point of the parent branch and the 
+        start point of the daughter branch are not the same
+    ValueError
+        Raises and error if the length of the midline vector is != 1
+    ValueError
+        Raises and error if the length of the branch vector is != 1
+
+    """
+    tree = nx.DiGraph(graph)
+    tree.remove_edges_from(tree.edges - nx.bfs_edges(tree, origin))
+
+    compute_start_end_node(tree, origin)
+
+    angle_dict = {}
+    start_nodes = nx.get_edge_attributes(tree, 'start_node')
+    end_nodes = nx.get_edge_attributes(tree, 'end_node')
+
+    node_coordinates =nx.get_node_attributes(tree, 'node_coordinate')
+
+    attr_dict = {}
+    center_points = []
+    midline_points = []
+
+    for u,v,attr in tree.edges(data = True):
+        edge = (u,v)
+        if len(tree.out_edges(edge[1])) != 2:
+            continue
+        
+        if not tree.in_edges(start_nodes[edge]):
+            # angle_dict[edge] = 0
+
+            attr_dict[edge] = attr
+            attr_dict[edge]['edge'] = edge
+            continue
+
+        parent_edge = list(tree.in_edges(start_nodes[edge]))[0]
+
+        parent_start_node_coordinates = node_coordinates[start_nodes[parent_edge]]
+        parent_end_node_coordinates = node_coordinates[end_nodes[parent_edge]]
+
+        print
+        parent_vector = unit_vector(parent_start_node_coordinates - parent_end_node_coordinates)
+        midline_vector = -parent_vector
+
+        start_node_coordinates = node_coordinates[start_nodes[edge]]
+
+        if np.all(parent_end_node_coordinates != start_node_coordinates):
+            raise ValueError('Branch point ill defined.')
+
+        end_node_coordinates = node_coordinates[end_nodes[edge]]
+        branch_vector = unit_vector(end_node_coordinates - start_node_coordinates)
+
+        if round(np.linalg.norm(midline_vector)) != 1:
+            raise ValueError('Midline vector is not normalized. Its length is {}'.format(np.linalg.norm(midline_vector)))
+        if round(np.linalg.norm(branch_vector)) != 1:
+            raise ValueError('Branch vector is not normalized. Its length is {}'.format(np.linalg.norm(branch_vector)))
+
+
+
+
+        dot = np.dot(midline_vector, branch_vector)
+        angle = np.degrees(np.arccos(dot))
+
+        angle_dict[edge] = angle
+        attr_dict[edge] = attr
+        attr_dict[edge]['angle'] = angle
+        attr_dict[edge]['edge'] = edge
+
+        
+
+
+        #store for viz
+        center_points.append(parent_end_node_coordinates)
+        midline_points.append(parent_end_node_coordinates + (10 * midline_vector))
+
+
+    angle_df = pd.DataFrame.from_dict(attr_dict, orient ='index').reset_index(drop=True)
+        
+    
+    return angle_df, center_points, midline_points
+
+
+
+
+
+
+
+
+
+
+
+def add_parent_angles_to_df(graph:nx.graph,df:pd.DataFrame, origin:int):
+    tree = nx.DiGraph(graph)
+    tree.remove_edges_from(tree.edges - nx.bfs_edges(tree, origin))
+
+    edge_length = []
+    parent_edges = []
+    angle_edges = df['edge']
+    for edge in angle_edges:
+        edge = graph.edges[edge]
+
+        edge_length.append(edge['length'])
+        # parent_edges.append(e14_skeleton.graph.edges[edge]['parent'])
+        if not tree.in_edges(edge['start_node']):
+            parent_edges.append(None)
+
+            continue
+
+        parent_edge = tree.in_edges(edge['start_node'])
+        parent_edges.append(list(parent_edge)[0])
+    df['length'] = edge_length
+    df['parent_edge'] = parent_edges
+
+    parent_angle = []
+    parent_nTips = []
+
+    for row in df.iterrows():
+        parent_row = df.loc[df['edge'] == row[1]['parent_edge']]
+
+        if len(parent_row) == 0:
+            parent_angle.append(None)
+            parent_nTips.append(None)
+        else:
+            parent_angle.append(parent_row['angle'].values[0])
+            # parent_nTips.append(parent_row['num_tips'].values[0])
+            
+    df['parent_angle'] = parent_angle
+    # df['parent_nTips'] = parent_nTips
+    return df
+
+
 def compute_branch_orientation(graph:nx.Graph, origin:int) -> pd.DataFrame:
     """Computes in which orienation branch points (Nodes with degree 3) are oriented.
       Compare with trachea orientation to determine if branches are oriented in the same direction.
