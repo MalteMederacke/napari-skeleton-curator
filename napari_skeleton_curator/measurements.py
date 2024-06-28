@@ -55,8 +55,8 @@ def compute_midline_branch_angles(graph:nx.Graph, origin:int, sample_distance:fl
 
     for u,v,attr in tree.edges(data = True):
         edge = (u,v)
-        if len(tree.out_edges(edge[1])) != 2:
-            continue
+        # if len(tree.out_edges(edge[1])) != 2:
+        #     continue
         
         #continue if no parent edge (eg. trachea)
         if not tree.in_edges(start_nodes[edge]):
@@ -170,8 +170,8 @@ def compute_midline_branch_angle_branch_nodes(graph:nx.digraph, origin:int):
 
     for u,v,attr in tree.edges(data = True):
         edge = (u,v)
-        if len(tree.out_edges(edge[1])) != 2:
-            continue
+        # if len(tree.out_edges(edge[1])) != 2:
+        #     continue
         
         if not tree.in_edges(start_nodes[edge]):
             # angle_dict[edge] = 0
