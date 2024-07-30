@@ -12,7 +12,7 @@ setup(
    url='',
    license='LICENSE.txt',
    description='Parse graphs from networkx to napari and modify them.',
-   long_description=open('README.txt').read(),
+   long_description=open('README.md').read(),
    install_requires=[
        "napari",
        "numpy",

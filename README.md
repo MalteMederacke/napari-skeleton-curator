@@ -29,6 +29,8 @@ You can install `napari-skeleton-curator` via [pip]:
 
     pip install napari-skeleton-curator
 
+Or the latest 
+
 ## Usage
 `code/skeleton.py` contains the functionallity  
 `examples/skeleton_merge_nodes.ipynb` is a notebook that demonstrates the data type and workflow.

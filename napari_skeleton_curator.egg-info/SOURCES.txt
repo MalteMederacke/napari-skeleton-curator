@@ -1,5 +1,5 @@
 LICENCE
-README.txt
+README.md
 requirements.txt
 setup.py
 napari_skeleton_curator/__init__.py

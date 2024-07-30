@@ -82,7 +82,19 @@ def compute_branch_length(graph):
     nx.set_edge_attributes(graph, length_dir, 'length')
 
 
+def order_points(path, start_point):
+    ordered_path = [start_point]
+    remaining_points = set(range(len(path))) - {start_point}
 
+    while remaining_points:
+        distances = cdist([path[ordered_path[-1]]], path[list(remaining_points)])
+        nearest_point_index = list(remaining_points)[np.argmin(distances)]
+        ordered_path.append(nearest_point_index)
+        remaining_points.remove(nearest_point_index)
+
+    ordered_path = np.array([path[i] for i in ordered_path])
+
+    return ordered_path
 
 def update_edge_merged_to_first_node(skeleton, new_edge, new_node_index):
     """Clean up an edge that was merged to the start node.
@@ -645,16 +657,19 @@ class Skeleton3D:
 
     @classmethod
     def parse(
-            cls,
-            graph: nx.Graph,
-            edge_attributes: Optional[Dict[str, Any]]=None,
-            node_attributes: Optional[Dict[str, Any]]=None,
-            edge_coordinates_key: str = EDGE_COORDINATES_KEY,
-            node_coordinate_key: str = NODE_COORDINATE_KEY,
-            scale: Tuple[float, float, float] = (1, 1, 1)
+        cls,
+        graph: nx.Graph,
+        edge_attributes: Optional[Dict[str, Any]] = None,
+        node_attributes: Optional[Dict[str, Any]] = None,
+        edge_coordinates_key: str = EDGE_COORDINATES_KEY,
+        node_coordinate_key: str = NODE_COORDINATE_KEY,
+        scale: Tuple[float, float, float] = (1, 1, 1)
     ):
-        # make a copy of the graph so we don't clobber the original attributes
+    # make a copy of the graph so we don't clobber the original attributes
         graph = deepcopy(graph)
+
+        edge_coordinates_key = EDGE_COORDINATES_KEY
+        node_coordinate_key = NODE_COORDINATE_KEY
 
         scale = np.asarray(scale)
         if edge_attributes is None:
@@ -662,135 +677,63 @@ class Skeleton3D:
         if node_attributes is None:
             node_attributes = {}
 
-        # keys for the edge attributes holding the start and
-        # end node for the edge coordinates
-        node_index_keys = (
-            EDGE_FEATURES_START_NODE_KEY,
-            EDGE_FEATURES_END_NODE_KEY
-        )
+        # keys for the edge attributes holding the start and end node for the edge coordinates
+        node_index_keys = {EDGE_FEATURES_START_NODE_KEY, EDGE_FEATURES_END_NODE_KEY}
 
         # parse the edge attributes
         parsed_edge_attributes = {}
+        node_coords = dict(graph.nodes(data=node_coordinate_key))
         for start_index, end_index, attributes in graph.edges(data=True):
-            # remove attribute not specified
-            keys_to_delete = [
-                key for key in attributes if (
-                        (key not in edge_attributes) and (key != edge_coordinates_key)
-                        and (key not in node_index_keys)
-                )
-            ]
-            for key in keys_to_delete:
-                del attributes[key]
 
-            for expected_key, default_value in edge_attributes.items():
-                # add expected keys that are missing
-                if expected_key not in attributes:
-                    attributes.update({expected_key: default_value})
+            print(f('parsing... start_index: {start_index}, end_index: {end_index}'))
 
-            # make the edge spline
-            # coordinates = np.asarray(attributes[edge_coordinates_key]) * scale
-            # spline = Spline3D(points=coordinates)
+            edge_coords = np.asarray(attributes[edge_coordinates_key], dtype=float) * scale
+            
+            # Remove unwanted attributes and add expected keys with default values
+            attributes = {key: attributes.get(key, edge_attributes.get(key)) 
+                            for key in set(attributes) | set(edge_attributes)
+                            if key in edge_attributes or key == edge_coordinates_key or key in node_index_keys}
 
-            #if we have directionality in the graph, we should construct the spline
-            #from start node to end node.
-            if (EDGE_FEATURES_START_NODE_KEY in attributes):
-                if np.allclose(dict(graph.nodes(data =node_coordinate_key))[attributes[EDGE_FEATURES_START_NODE_KEY]],
-                               np.asarray(attributes[edge_coordinates_key])[-1]):
-                    coordinates = np.asarray(attributes[edge_coordinates_key]) * scale
-                    coordinate = np.flip(coordinates, axis=0)
-                    if len(np.unique(coordinates, axis=0)) != len(coordinates):
-                        print('Warning: Duplicate coordinates in edge... Discarding')
+            # Handle edge directionality
+            if EDGE_FEATURES_START_NODE_KEY in attributes and np.allclose(
+                    node_coords[attributes[EDGE_FEATURES_START_NODE_KEY]], edge_coords[-1]):
+                edge_coords = np.flip(edge_coords, axis=0)
+            
+            # Remove duplicate coordinates
+            _, unique_indices = np.unique(edge_coords, axis=0, return_index=True)
+            edge_coords = edge_coords[np.sort(unique_indices)]
+            
+            # Ensure at least 3 points
+            if len(edge_coords) <= 3:
+                edge_coords = np.insert(edge_coords, -1, edge_coords[-1] - 0.1, axis=0)
+                if len(edge_coords) <= 3:
+                    edge_coords = np.insert(edge_coords, -1, edge_coords[-1] - 0.01, axis=0)
 
-                        _, idx = np.unique(coordinates, axis=0, return_index=True)
-                        coordinates = coordinates[np.sort(idx)]
-                    # print(coordinate.shape, coordinate.dtype,'flip')
-                    # spline = Spline3D(points=coordinate)
-                else :
-                    coordinates = np.asarray(attributes[edge_coordinates_key]) * scale
-                    # print(coordinate.shape, coordinate.dtype,'no flip')
-                    if len(np.unique(coordinates, axis=0)) != len(coordinates):
-                        print('Warning: Duplicate coordinates in edge... Discarding')
+            # Create spline
+            spline = Spline3D(points=edge_coords)
 
-                        _, idx = np.unique(coordinates, axis=0, return_index=True)
-                        coordinates = coordinates[np.sort(idx)]
-
-                    # spline = Spline3D(points=coordinates)
-            else :
-                coordinates = np.asarray(attributes[edge_coordinates_key]) * scale
-                if len(np.unique(coordinates, axis=0)) != len(coordinates):
-                    print('Warning: Duplicate coordinates in edge {}{}... Discarding').format(start_index,end_index)
-                    # print(coordinates)
-
-                    _, idx = np.unique(coordinates, axis=0, return_index=True)
-                    coordinates = coordinates[np.sort(idx)]
-                # print(coordinate.shape, coordinate.dtype,'no dir')
-            # print(len(coordinates))
-                    
-
-            if len(coordinates) <= 3:
-                #add a point in the middle... NOT PRETTY
-                print(f"Warning: Edge {start_index}{end_index} has less than 3 points. Adding a point in the middle.")
-                coordinates = np.insert(coordinates, -1,coordinates[-1]-0.1, axis = 0)
-                if len(coordinates) <=3:
-                    coordinates = np.insert(coordinates, -1,coordinates[-1]-0.01, axis = 0)
-                print('new length', len(coordinates))
-
-            if np.unique(coordinates, axis=0).shape[0] != coordinates.shape[0]:
-                _, unique_indices = np.unique(coordinates, axis=0, return_index=True)
-                coordinates = coordinates[unique_indices]
-
-
-            spline = Spline3D(points=coordinates)
-
-            parsed_edge_attributes.update(
-                {
-                    (start_index, end_index): {
-                        EDGE_COORDINATES_KEY: coordinates,
-                        EDGE_SPLINE_KEY: spline,
-                    }
-                }
-            )
-
-            if (EDGE_FEATURES_START_NODE_KEY not in attributes) or \
-                (EDGE_FEATURES_END_NODE_KEY not in attributes):
-               warnings.warn(f"edge start/end node not provided.\
-                             inferring from edge key: {(start_index, end_index)}")
-               parsed_edge_attributes[(start_index, end_index)].update(
-                {
-                    EDGE_FEATURES_START_NODE_KEY: start_index,
-                    EDGE_FEATURES_END_NODE_KEY: end_index,
-                }
-            ) 
+            parsed_edge_attributes[(start_index, end_index)] = {
+                EDGE_COORDINATES_KEY: edge_coords,
+                EDGE_SPLINE_KEY: spline,
+                EDGE_FEATURES_START_NODE_KEY: attributes.get(EDGE_FEATURES_START_NODE_KEY, start_index),
+                EDGE_FEATURES_END_NODE_KEY: attributes.get(EDGE_FEATURES_END_NODE_KEY, end_index),
+            }
 
         nx.set_edge_attributes(graph, parsed_edge_attributes)
 
         # parse the node attributes
         parsed_node_attributes = {}
         for node_index, attributes in graph.nodes(data=True):
-            # remove attribute not specified
-            keys_to_delete = [
-                key for key in attributes if (
-                        (key not in node_attributes) and (key != node_coordinate_key)
-                )
-            ]
-            for key in keys_to_delete:
-                del attributes[key]
+            # Remove unwanted attributes and add expected keys with default values
+            attributes = {key: attributes.get(key, node_attributes.get(key))
+                            for key in set(attributes) | set(node_attributes)
+                            if key in node_attributes or key == node_coordinate_key}
 
-            for expected_key, default_value in node_attributes.items():
-                # add expected keys that are missing
-                if expected_key not in attributes:
-                    attributes.update({expected_key: default_value})
-            # add the node coordinates
-            coordinate = np.asarray(attributes[node_coordinate_key])
-            coordinate = coordinate * scale
+            # Scale the node coordinates
+            coordinates = np.asarray(attributes[node_coordinate_key]) * scale
 
-            parsed_node_attributes.update(
-                {
-                    node_index: {
-                        NODE_COORDINATE_KEY: coordinate
-                    }
-                }
-            )
+            parsed_node_attributes[node_index] = {NODE_COORDINATE_KEY: coordinates}
+
         nx.set_node_attributes(graph, parsed_node_attributes)
 
         return cls(graph=graph)
@@ -1579,6 +1522,42 @@ class SkeletonViewer:
         if update: 
             self.update()
     
+    def length_pruning(self, length_threshold:int):
+        graph = self.skeleton.graph.copy()
+        g_unmodified = graph.copy()
+
+        #check if length is already computed
+        if  len(nx.get_edge_attributes(graph, 'length')) == 0:
+            compute_branch_length(graph)
+
+        for node, degree in g_unmodified.degree():
+            if degree == 1:
+                edge = list(graph.edges(node))[0]
+                path_length = graph.edges[edge[0]][edge[1]]['length']
+                if path_length < length_threshold:
+                    c+=1
+                    #check orientation of edge
+                    if graph.edges[edge['start_node'] == edge[1]]:
+                        edge =edge[::-1]
+                    try:
+                        self.delete_edge(graph, edge)
+                        print(f'deleted{edge}')
+                    except:
+                        print(f'could not delete{edge}')
+                        continue
+        self.update()
+        print('pruning done')
+        #check if there are new short edges
+        graph = self.skeleton.graph.copy()
+        for node, degree in graph.degree():
+            if degree == 1:
+                edge = list(graph.edges(node))[0]
+                path_length = graph.edges[edge[0]][edge[1]]['length']
+                if path_length < length_threshold:
+                    print(f'new short edge: {edge}. consider rerunning pruning')
+
+
+    
     def count_number_of_tips_connected_to_edge(self, plot_tips:bool= True):
         #get highlighted edge
 
@@ -1638,9 +1617,7 @@ class SkeletonViewer:
                                edge_width=4, 
                                edge_color='blue', 
                                name='subtree')
-        # # return subtree
-        # skeleton_viewer.skeleton.graph.remove_nodes_from(subtree)
-        # skeleton_viewer.refresh()
+
     
 
     def render_part_of_tree(self, depth:int, refresh:bool = True):
@@ -1651,6 +1628,92 @@ class SkeletonViewer:
         self.edges_layer.data = [self.edges_layer.data[i] for i in new_features.index]
         self.edges_layer.features = new_features
         self.edges_layer.edge_width = 10
+
+
+    #edge split functions
+    def get_higlighted_edge_coordinates(self):
+        """Get the coordinates of the highlighted edge."""
+        # Get the highlighted edge
+        highlighted_edge = self.highlighted_edges
+        highlighted_edge = highlighted_edge.start_node.values[0], highlighted_edge.end_node.values[0]
+        edge_to_split_ID = highlighted_edge
+        edge_coordinates = self.skeleton.graph[edge_to_split_ID[0]][edge_to_split_ID[1]][EDGE_COORDINATES_KEY]
+
+        print(f'number of coordinates: {len(edge_coordinates)}')
+
+        # Get the coordinates of the highlighted edge
+
+        return edge_to_split_ID, edge_coordinates
+
+    def view_split_position(self, split_pos:int):
+
+        edge_to_split_ID,edge_coordinates = self.get_higlighted_edge_coordinates()
+        coordinate_to_split = edge_coordinates[split_pos]
+        self.viewer.add_points(coordinate_to_split)
+
+        #get first unused node number
+        node_numbers = list(self.skeleton.graph.nodes())
+        node_numbers.sort()
+
+        while node_numbers[0] +1 in node_numbers:
+            node_numbers.pop(0)
+            free_node = node_numbers[0] +1
+
+        print(list(self.skeleton.graph.nodes()).count(free_node))
+        return  edge_to_split_ID,coordinate_to_split, free_node
+
+
+    def split_edge(self,edge_to_split_ID, split_pos, new_node_number):
+        """Split the edge at the specified point."""
+        g = self.skeleton.graph.copy()
+        edge_coordinates = g.edges[edge_to_split_ID][EDGE_COORDINATES_KEY]
+        coordinate_to_split = edge_coordinates[split_pos]
+
+        g.add_node(new_node_number, node_coordinate = coordinate_to_split)
+        g.add_edge(edge_to_split_ID[0],new_node_number, edge_coordinates = edge_coordinates[:split_pos],
+                    start_node = edge_to_split_ID[0], 
+                    end_node = new_node_number, 
+                    edge_spline = Spline3D(points = edge_coordinates[:split_pos]))
+        g.add_edge(new_node_number, edge_to_split_ID[1], edge_coordinates = edge_coordinates[split_pos:], 
+                start_node = new_node_number, 
+                end_node = edge_to_split_ID[1], 
+                validated = False,
+                edge_spline = Spline3D(points = edge_coordinates[split_pos:]))
+        g.remove_edge(*edge_to_split_ID)
+        
+        
+        self.skeleton.graph = g
+        self.update()
+
+
+    def connect_without_merging(self, u: int, v: int):
+        """
+        Connect two nodes without merging them.
+        """
+        u_coordinates = self.skeleton.graph.nodes[u][NODE_COORDINATE_KEY]
+        v_coordinates = self.skeleton.graph.nodes[v][NODE_COORDINATE_KEY]
+        path = np.linspace(u_coordinates, v_coordinates, num=20)
+        spline = Spline3D(points =path)
+
+        g = self.skeleton.graph.copy()
+        g.add_edge(u, v, edge_coordinates=path, edge_spline=spline, start_node=u, end_node=v)
+        self.skeleton.graph = g
+
+        self.update()
+
+    def reorder_spline(self):
+        """Reorder the spline of the highlighted edge."""
+        # Get the highlighted edge
+        highlighted_edge = self.highlighted_edges
+        highlighted_edge = (highlighted_edge['start_node'].values[0], highlighted_edge['end_node'].values[0])
+
+        node_coordinate = self.skeleton.graph.nodes[highlighted_edge[0]][NODE_COORDINATE_KEY]
+        path = self.skeleton.graph.edges[highlighted_edge][EDGE_COORDINATES_KEY]
+
+        ordered_path = order_points(path, 0)
+        self.skeleton.graph.edges[highlighted_edge][EDGE_COORDINATES_KEY] = ordered_path
+        self.skleton.graph.edges[highlighted_edge][EDGE_SPLINE_KEY].points = ordered_path
+        self.update()
 
 
 
