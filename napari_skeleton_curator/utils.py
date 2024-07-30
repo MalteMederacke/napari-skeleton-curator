@@ -376,7 +376,7 @@ def skan_to_networkx(skeleton):
 def networkx_to_skan(skeleton_graph):
     #create skan skeleton
     skel = sk.Skeleton(skeleton3D_to_skan(skeleton_graph))
-    skel.graph = nx.to_scipy_sparse_array(skeleton_graph_simple)
+    skel.graph = nx.to_scipy_sparse_array(skeleton_graph)
 
     return skel
 

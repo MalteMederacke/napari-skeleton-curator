@@ -505,12 +505,8 @@ def skeleton3D_to_skan(G,include_edge_points = True, branch_point_value = 1, edg
     """
 
 
-    pos_dict = nx.get_node_attributes(G, 'edge_coordinates')
-    # pos_array = np.asarray(list(pos.values()))
-
-
-    # pos = np.asarray([n for n in dict(G.nodes(data = 'node_coordinate')).values()])
-    edges = np.array(G.edges)
+    pos = nx.get_edge_attributes(G, 'edge_coordinates')
+    pos = np.concatenate(list(pos.values()))
 
 
     x_offset = 0
