@@ -3,6 +3,7 @@ README.md
 requirements.txt
 setup.py
 napari_skeleton_curator/__init__.py
+napari_skeleton_curator/break_detection.py
 napari_skeleton_curator/measurements.py
 napari_skeleton_curator/skeleton.py
 napari_skeleton_curator/utils.py
