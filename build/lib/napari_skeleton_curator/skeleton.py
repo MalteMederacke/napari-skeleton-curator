@@ -40,7 +40,6 @@ EDGE_FEATURES_END_NODE_KEY = "end_node"
 EDGE_FEATURES_HIGHLIGHT_KEY = "highlight"
 
 
-#code to compute branch angles and orientation
 
 
 def compute_level(graph:nx.Graph, origin:int):
@@ -685,7 +684,7 @@ class Skeleton3D:
         node_coords = dict(graph.nodes(data=node_coordinate_key))
         for start_index, end_index, attributes in graph.edges(data=True):
 
-            print(f('parsing... start_index: {start_index}, end_index: {end_index}'))
+            print(f'parsing... start_index: {start_index}, end_index: {end_index}')
 
             edge_coords = np.asarray(attributes[edge_coordinates_key], dtype=float) * scale
             
@@ -1087,7 +1086,8 @@ class SkeletonViewer:
 
         # add the widget for viewing around a node
         self.sub_volume_widget = magicgui(self.view_subvolume_around_node, 
-                                        node_index={"max": 1E7, "min": 0}, 
+                                        node_index={"max": 1E7, "min": 0},
+                                        bounding_box_width = {"max":5000, "min":1},
                                         # image_voxel_size=dict(default = tuple([self.image_voxel_size]*3))
                                         )
         self.viewer.window.add_dock_widget(self.sub_volume_widget.native)
@@ -1101,7 +1101,10 @@ class SkeletonViewer:
         self.slicing_widget = magicgui(self.slice_selected_edges)
         self.viewer.window.add_dock_widget(self.slicing_widget.native)
 
-        # add the widget for merging edges
+        #add the widget for moving branch nodes or splitting edges
+        move_branch_widget = MoveBranchPointOrSplitEdgeWidget(self)
+        self.viewer.window.add_dock_widget(move_branch_widget, area='right')
+
         # self.merge_edges_widget = magicgui(self.merge_highlighted_edge_with_parent, call_button='merge edge')
         # self.viewer.window.add_dock_widget(self.merge_edges_widget.native)
         
@@ -1716,6 +1719,55 @@ class SkeletonViewer:
         self.update()
 
 
+    def move_branch_point_along_edge(self, node, edge_to_shorten, edge_to_elongate,edge_to_remodel, distance):
+        g = self.skeleton.graph
+        #move branch point
+        point_on_in_edge = g.edges[edge_to_shorten]['edge_spline'].sample(distance)
+
+        #split edge_coordinates into two parts at the point_on_in_edge
+        edge_coordinates = g.edges[edge_to_shorten]['edge_coordinates']
+        # idx = np.where(np.all(edge_coordinates == point_on_in_edge, axis=1))
+        #rather get the closest point
+        idx = np.argmin(np.linalg.norm(edge_coordinates - point_on_in_edge, axis=1))
+        #split
+        edge_coordinates_1 = edge_coordinates[:idx+1]
+        edge_coordinates_2 = edge_coordinates[idx:]
+
+
+        out_edge_coordinates = g.edges[edge_to_elongate]['edge_coordinates']
+        new_out_edge_coordinates = np.concatenate((edge_coordinates_2, out_edge_coordinates))
+        new_out_edge_coordinates = np.unique(new_out_edge_coordinates, axis=0)
+
+        new_in_edge_coordinates = edge_coordinates_1
+        new_node_pos = edge_coordinates[idx]
+
+
+
+        #update edges 
+        self.skeleton.graph.edges[edge_to_shorten]['edge_coordinates'] = new_in_edge_coordinates
+        self.skeleton.graph.edges[edge_to_elongate]['edge_coordinates'] = new_out_edge_coordinates
+        self.skeleton.graph.nodes[node]['node_coordinate'] = new_node_pos
+
+        #update splines
+        self.skeleton.graph.edges[edge_to_shorten]['edge_spline'] = Spline3D(points=new_in_edge_coordinates)
+        self.skeleton.graph.edges[edge_to_elongate]['edge_spline'] = Spline3D(points=new_out_edge_coordinates)
+        # print(edge_coordinates_1, edge_coordinates_2)
+
+        #viewer.add_points(point_on_in_edge, face_color='red', size=3, name='branch_point')
+
+        #draw new edge for the other out edge
+        out_edge_node2 = edge_to_remodel[1]
+        out_edge_node2_pos = g.nodes[out_edge_node2]['node_coordinate']
+        new_out_edge_coordinates = np.linspace(new_node_pos, out_edge_node2_pos, 10)
+
+        #update edge
+        self.skeleton.graph.edges[edge_to_remodel]['edge_coordinates'] = new_out_edge_coordinates
+        self.skeleton.graph.edges[edge_to_remodel]['edge_spline'] = Spline3D(points=new_out_edge_coordinates)
+
+        self.update()
+
+
+
 
 
 
@@ -1878,3 +1930,142 @@ class QtImageSliceWidget(QWidget):
             return
         self.current_channel_index = self.image_selector.currentIndex()
         self.draw_at_current_slice_index()
+
+
+    from qtpy.QtCore import Qt
+from qtpy.QtWidgets import QComboBox, QVBoxLayout, QWidget, QPushButton, QSpinBox, QLabel, QFormLayout
+from superqt.sliders import QLabeledSlider
+
+from qtpy.QtCore import Qt
+from qtpy.QtWidgets import QComboBox, QVBoxLayout, QWidget, QPushButton, QSpinBox, QLabel, QFormLayout
+from superqt.sliders import QLabeledSlider
+
+class MoveBranchPointOrSplitEdgeWidget(QWidget):
+    def __init__(self, skeleton_viewer, 
+                 node_index={"max": int(1E7), "min": -10}, 
+                 edge_to_shorten={"max": int(1E7), "min": -10},
+                 edge_to_remodel={"max": int(1E7), "min": -10}, 
+                 edge_to_elongate={"max": int(1E7), "min": -10}):
+        super().__init__()
+        self.viewer = skeleton_viewer.viewer
+        self.highlighted_edge = skeleton_viewer.highlighted_edges
+        self.skeleton_viewer = skeleton_viewer
+
+        # Creating sliders
+        self.edge_slider = QLabeledSlider(Qt.Orientation.Horizontal)
+        self.edge_slider.setRange(0, 99)
+        self.edge_slider.setSliderPosition(50)
+        self.edge_slider.setSingleStep(1)
+        self.edge_slider.setTickInterval(1)
+        self.edge_slider.valueChanged.connect(self._on_slider_moved)
+
+        # Creating spinboxes for init parameters
+        self.node_index_spinbox = QSpinBox()
+        self.node_index_spinbox.setRange(node_index["min"], node_index["max"])
+        self.node_index_spinbox.setValue(0)
+
+        self.edge_to_shorten_spinbox = QSpinBox()
+        self.edge_to_shorten_spinbox.setRange(edge_to_shorten["min"], edge_to_shorten["max"])
+        self.edge_to_shorten_spinbox.setValue(0)
+
+        self.edge_to_remodel_spinbox = QSpinBox()
+        self.edge_to_remodel_spinbox.setRange(edge_to_remodel["min"], edge_to_remodel["max"])
+        self.edge_to_remodel_spinbox.setValue(0)
+
+        self.edge_to_elongate_spinbox = QSpinBox()
+        self.edge_to_elongate_spinbox.setRange(edge_to_elongate["min"], edge_to_elongate["max"])
+        self.edge_to_elongate_spinbox.setValue(0)
+
+        # Creating buttons
+        self.execute_button = QPushButton('Move Branch Point')
+        self.execute_button.clicked.connect(self._move_branch_point)
+
+        #split edge
+        self.split_edge_button = QPushButton('Split Edge')
+        self.split_edge_button.clicked.connect(self._split_edge)
+
+        # Setting layout
+        layout = QVBoxLayout()
+
+        form_layout = QFormLayout()
+        form_layout.addRow(QLabel("Node Index:"), self.node_index_spinbox)
+        form_layout.addRow(QLabel("Edge to Shorten:"), self.edge_to_shorten_spinbox)
+        form_layout.addRow(QLabel("Edge to Remodel:"), self.edge_to_remodel_spinbox)
+        form_layout.addRow(QLabel("Edge to Elongate:"), self.edge_to_elongate_spinbox)
+
+        layout.addLayout(form_layout)
+        layout.addWidget(self.edge_slider)
+        layout.addWidget(self.execute_button)
+        layout.addWidget(self.split_edge_button)
+
+        self.setLayout(layout)
+    
+    def _on_slider_moved(self, event=None):
+        self._plot_edge_position()
+
+    def _plot_edge_position(self):
+        distance = self.edge_slider.value() / 100
+        self.highlighted_edge = self.skeleton_viewer.highlighted_edges
+        highlighted_edge = (self.highlighted_edge['start_node'].values[0], self.highlighted_edge['end_node'].values[0])
+        
+        if any([layer.name == 'new_branch_point' for layer in self.viewer.layers]):
+            self.viewer.layers['new_branch_point'].data = self.skeleton_viewer.skeleton.graph.edges[highlighted_edge]['edge_spline'].sample(distance)
+        else:
+            self.viewer.add_points(self.skeleton_viewer.skeleton.graph.edges[highlighted_edge]['edge_spline'].sample(distance), face_color='red', size=10, name='new_branch_point')
+        
+    def _move_branch_point(self):
+        distance = self.edge_slider.value() / 100
+        highlighted_edge = (self.highlighted_edge['start_node'].values[0], self.highlighted_edge['end_node'].values[0])
+        
+        node_index = self.node_index_spinbox.value()
+        edge_to_shorten = self.edge_to_shorten_spinbox.value()
+        edge_to_remodel = self.edge_to_remodel_spinbox.value()
+        edge_to_elongate = self.edge_to_elongate_spinbox.value()
+
+        edge_to_shorten = (node_index, edge_to_shorten)
+        edge_to_remodel = (node_index, edge_to_remodel)
+        edge_to_elongate = (node_index, edge_to_elongate)
+
+
+        #check directonality
+        edges = [edge_to_shorten, edge_to_remodel, edge_to_elongate]
+        edges_correct_direction = []
+        for edge in edges:
+            try:
+                self.skeleton_viewer.skeleton.graph.edges[edge]
+            except KeyError:
+        
+                edge = (edge[1], edge[0])
+
+            edges_correct_direction.append(edge)
+
+        edge_to_shorten, edge_to_remodel, edge_to_elongate = edges_correct_direction
+            
+
+        self.skeleton_viewer.move_branch_point_along_edge(node = node_index, 
+                                                            edge_to_shorten = edge_to_shorten, 
+                                                            edge_to_elongate = edge_to_elongate, 
+                                                            edge_to_remodel = edge_to_remodel, 
+                                                            distance = distance)
+
+    def _split_edge(self):
+        edge_to_split_ID,edge_coordinates = self.skeleton_viewer.get_higlighted_edge_coordinates()
+        distance = self.edge_slider.value() / 100
+        point_on_edge = self.skeleton_viewer.skeleton.graph.edges[edge_to_split_ID]['edge_spline'].sample(distance)
+        idx = np.argmin(np.linalg.norm(edge_coordinates - point_on_edge, axis=1))
+
+
+        node_numbers = list(self.skeleton_viewer.skeleton.graph.nodes)
+        node_numbers.sort()
+
+        while node_numbers[0] +1 in node_numbers:
+            node_numbers.pop(0)
+            free_node = node_numbers[0] +1
+        
+        self.skeleton_viewer.split_edge(edge_to_split_ID = edge_to_split_ID, 
+                                        split_pos = idx, 
+                                        new_node_number = free_node)
+        
+        # coordinate_to_split = edge_coordinates[split_pos]
+
+

@@ -2,6 +2,8 @@ import numpy as np
 import networkx as nx
 from scipy.spatial.transform import Rotation as R
 from morphosamplers.spline import Spline3D
+from scipy.spatial import cKDTree
+from collections import defaultdict, deque
 
 import skan as sk
 import networkx as nx
@@ -376,7 +378,7 @@ def skan_to_networkx(skeleton):
 def networkx_to_skan(skeleton_graph):
     #create skan skeleton
     skel = sk.Skeleton(skeleton3D_to_skan(skeleton_graph))
-    skel.graph = nx.to_scipy_sparse_array(skeleton_graph_simple)
+    skel.graph = nx.to_scipy_sparse_array(skeleton_graph)
 
     return skel
 
@@ -520,8 +522,79 @@ def skeleton3D_to_skan(G,include_edge_points = True, branch_point_value = 1, edg
     skeleton_image[pos[:,0], pos[:,1], pos[:,2]] = 1
 
     return skeleton_image
+
+
+def merge_two_graphs_with_overlap(graph1, graph2, distance_threshold=3):
+    graph2 = graph2.copy()
+    edges1 = nx.get_edge_attributes(graph1, 'edge_coordinates')
+    edges1_coords = np.concatenate(list(edges1.values()))
+
+    edges2 = nx.get_edge_attributes(graph2, 'edge_coordinates')
+    edges2_coords =np.concatenate(list(edges2.values()))
+
+
+
+    edges2_rev = {}
+    for key, array in edges2.items():
+        for coord in array:
+            edges2_rev[tuple(coord)] = {'edge':key, 'distance':None}
+
+
+    kdt = cKDTree(edges1_coords)
+    dist, indices = kdt.query(edges2_coords)
+
+    for i,coord in enumerate(edges2_coords): 
+        distance = dist[i]
+        edges2_rev[tuple(coord)]['distance'] = distance
+
+    #summarize to get the avarage distance per edge...
+    edge_distances = {}
+    for key, value in edges2_rev.items():
+        edge = value['edge']
+        distance = value['distance']
+        if edge not in edge_distances:
+            edge_distances[edge] = []
+        edge_distances[edge].append(distance)
+
+
+
+    #get mean distance per edge
+    mean_edge_distances = {}
+    for key, value in edge_distances.items():
+        mean_edge_distances[key] = np.mean(value)
+
+
+    print(len({k for k,v in mean_edge_distances.items() if v < distance_threshold}), 'edges removed')
+
+    #TODO: rename the edges of graph2 to be unique...
+    graph2.remove_edges_from({k for k,v in mean_edge_distances.items() if v < distance_threshold})
+
+
+    skel_graph_merged = nx.compose(graph1, graph2)
+    #remove nodes without edges
+    skel_graph_merged.remove_nodes_from(list(nx.isolates(skel_graph_merged)))
+
+    return skel_graph_merged
     
 
 
+
+def get_nth_generation_edges(graph:nx.DiGraph, start_node, n):
+    # Initialize a queue for BFS
+    queue = deque([(start_node, 0)])  # (current_node, current_level)
+    result = defaultdict(list)
+
+    while queue:
+        current_node, current_level = queue.popleft()
+
+        # If we have not yet reached the nth generation, continue to add children
+        if current_level < n:
+            for child in graph.successors(current_node):
+                result[current_level + 1].append((current_node, child))
+                queue.append((child, current_level + 1))
+
+    # Convert result to a list of lists
+    result_list = [result[level] for level in range(1, n + 1)]
+    return result_list
 
 
