@@ -1,5 +1,5 @@
 Metadata-Version: 2.1
-Name: napari_skeleton_curator
+Name: napari-skeleton-curator
 Version: 0.1.0
 Summary: Parse graphs from networkx to napari and modify them.
 Home-page: 

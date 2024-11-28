@@ -185,7 +185,6 @@ def compute_midline_branch_angle_branch_nodes(graph:nx.digraph, origin:int):
         parent_start_node_coordinates = node_coordinates[start_nodes[parent_edge]]
         parent_end_node_coordinates = node_coordinates[end_nodes[parent_edge]]
 
-        print
         parent_vector = unit_vector(parent_start_node_coordinates - parent_end_node_coordinates)
         midline_vector = -parent_vector
 
@@ -495,3 +494,41 @@ def compute_dimension_of_lobes(graph, lobe):
     minor_axis_length = max_distance - min_distance
 
     return major_axis_length, minor_axis_length, mesh
+
+
+def compute_vertical_distance_to_carina(node_id, graph, origin):
+    p1 = graph.nodes[node_id]['node_coordinate']
+
+
+    #find carina
+    carina_id = list(graph.edges(origin))[0][1]
+    carina_coordinate = graph.nodes[carina_id]['node_coordinate']
+
+    trachea_vector = graph.nodes[origin]['node_coordinate']-graph.nodes[carina_id]['node_coordinate']
+    tracheal_unit_vector = unit_vector(trachea_vector)
+    p1_carina  = carina_coordinate - p1
+    carina_unit_vector = unit_vector(p1_carina)
+
+    #distance to carina
+    d = np.linalg.norm(carina_coordinate - p1)
+    # #better use distance with sign
+    # d = np.dot(p1_carina, tracheal_unit_vector)
+
+
+    p1_trachea = p1+tracheal_unit_vector*1000
+    p1_trachea = p1_trachea[0]
+    #angle
+    beta = np.arccos(np.dot(carina_unit_vector, tracheal_unit_vector))
+
+    vertical_distance = d * np.cos(beta)
+    return vertical_distance
+
+
+def commulative_length_to_node(graph,node,origin):
+    path_to_node = nx.shortest_path(graph, origin, node)
+    edges_in_path = [(path_to_node[i], path_to_node[i+1]) for i in range(len(path_to_node)-1)]
+    length = 0
+    for edge in edges_in_path:
+        length += graph.edges[edge]['length']
+
+    return length

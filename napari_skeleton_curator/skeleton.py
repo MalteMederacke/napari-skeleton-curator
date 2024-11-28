@@ -28,7 +28,7 @@ from .utils import (unit_vector,
 
 
 import open3d as o3d
-
+import pickle
 
 NODE_COORDINATE_KEY = "node_coordinate"
 EDGE_COORDINATES_KEY = "edge_coordinates"
@@ -667,8 +667,7 @@ class Skeleton3D:
     # make a copy of the graph so we don't clobber the original attributes
         graph = deepcopy(graph)
 
-        edge_coordinates_key = EDGE_COORDINATES_KEY
-        node_coordinate_key = NODE_COORDINATE_KEY
+
 
         scale = np.asarray(scale)
         if edge_attributes is None:
@@ -1088,7 +1087,7 @@ class SkeletonViewer:
         self.sub_volume_widget = magicgui(self.view_subvolume_around_node, 
                                         node_index={"max": 1E7, "min": 0},
                                         bounding_box_width = {"max":5000, "min":1},
-                                        # image_voxel_size=dict(default = tuple([self.image_voxel_size]*3))
+                                        # image_voxel_size=dict(default = tuple([self.image_voxel_size]))
                                         )
         self.viewer.window.add_dock_widget(self.sub_volume_widget.native)
 
@@ -1526,38 +1525,39 @@ class SkeletonViewer:
             self.update()
     
     def length_pruning(self, length_threshold:int):
-        graph = self.skeleton.graph.copy()
-        g_unmodified = graph.copy()
+            graph = self.skeleton.graph.copy()
+            g_unmodified = graph.copy()
 
-        #check if length is already computed
-        if  len(nx.get_edge_attributes(graph, 'length')) == 0:
-            compute_branch_length(graph)
-
-        for node, degree in g_unmodified.degree():
-            if degree == 1:
-                edge = list(graph.edges(node))[0]
-                path_length = graph.edges[edge[0]][edge[1]]['length']
-                if path_length < length_threshold:
-                    c+=1
-                    #check orientation of edge
-                    if graph.edges[edge['start_node'] == edge[1]]:
-                        edge =edge[::-1]
-                    try:
-                        self.delete_edge(graph, edge)
-                        print(f'deleted{edge}')
-                    except:
-                        print(f'could not delete{edge}')
-                        continue
-        self.update()
-        print('pruning done')
-        #check if there are new short edges
-        graph = self.skeleton.graph.copy()
-        for node, degree in graph.degree():
-            if degree == 1:
-                edge = list(graph.edges(node))[0]
-                path_length = graph.edges[edge[0]][edge[1]]['length']
-                if path_length < length_threshold:
-                    print(f'new short edge: {edge}. consider rerunning pruning')
+            #check if length is already computed
+            if  len(nx.get_edge_attributes(graph, 'length')) == 0:
+                skeleton.compute_branch_length(graph)
+            c = 0
+            for node, degree in g_unmodified.degree():
+                if degree == 1:
+                    edge = list(graph.edges(node))[0]
+                    path_length = graph.edges[edge[0], edge[1]].get('length')
+                    start_node = graph.edges[edge]['start_node']
+                    if path_length < length_threshold:
+                        c+=1
+                        #check orientation of edge
+                        if start_node == edge[0]:
+                            edge =edge[::-1]
+                        try:
+                            self.delete_edge(graph, edge)
+                            print(f'deleted{edge}')
+                        except:
+                            print(f'could not delete{edge}')
+                            continue
+            self.update()
+            print('pruning done')
+            #check if there are new short edges
+            graph = self.skeleton.graph.copy()
+            for node, degree in graph.degree():
+                if degree == 1:
+                    edge = list(graph.edges(node))[0]
+                    path_length = graph.edges[edge[0], edge[1]].get('length')
+                    if path_length < length_threshold:
+                        print(f'new short edge: {edge}. consider rerunning pruning')
 
 
     
@@ -1766,6 +1766,49 @@ class SkeletonViewer:
 
         self.update()
 
+
+    def merge_all_degree_2_edges(self, origin: int):
+        #make failsafer with forward loop
+        #merge all degree 2 edges
+        self.update()
+        g = self.skeleton.graph.copy()
+        node_counter = 0
+        current_node = None
+        for node, degree in g.degree:
+            if degree == 2:
+                edge_to_merge = list(g.edges(node))
+                if nx.shortest_path_length(g, origin, 
+                                           edge_to_merge[0][1]) < nx.shortest_path_length(g, 
+                                                                                          origin, 
+                                                                                          edge_to_merge[1][1]):
+                    start_node = edge_to_merge[0][1]
+                    end_node = edge_to_merge[1][1]
+                else:
+                    start_node = edge_to_merge[1][1]
+                    end_node = edge_to_merge[0][1]
+                try:
+                    self.skeleton.merge_edge(start_node, node, end_node)
+                except:
+                    if current_node == node:
+                        break
+                    else:
+                        current_node = node
+                    continue
+
+        self.update()
+
+    def save_graph(self, filename: str):
+        """Save the graph to a file."""
+        graph = self.skeleton.graph.copy()
+        #remove spline, as its not pickleble
+        # in the future this should be made possible
+        #and get rid of pickle for security reasons
+        for u,v, attr in graph.edges(data=True):
+            attr.pop('edge_spline')
+            
+        with open(filename, 'wb') as file:
+            pickle.dump(graph, file)
+        
 
 
 
@@ -2057,10 +2100,13 @@ class MoveBranchPointOrSplitEdgeWidget(QWidget):
 
         node_numbers = list(self.skeleton_viewer.skeleton.graph.nodes)
         node_numbers.sort()
-
-        while node_numbers[0] +1 in node_numbers:
+        
+        free_node = node_numbers[0] + 1
+        while free_node in node_numbers:
             node_numbers.pop(0)
-            free_node = node_numbers[0] +1
+            free_node = node_numbers[0] + 1  # Update free_node
+
+        print(free_node)
         
         self.skeleton_viewer.split_edge(edge_to_split_ID = edge_to_split_ID, 
                                         split_pos = idx, 

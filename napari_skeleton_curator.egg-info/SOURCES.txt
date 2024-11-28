@@ -6,6 +6,7 @@ napari_skeleton_curator/__init__.py
 napari_skeleton_curator/break_detection.py
 napari_skeleton_curator/measurements.py
 napari_skeleton_curator/skeleton.py
+napari_skeleton_curator/slice_annotation.py
 napari_skeleton_curator/utils.py
 napari_skeleton_curator.egg-info/PKG-INFO
 napari_skeleton_curator.egg-info/SOURCES.txt

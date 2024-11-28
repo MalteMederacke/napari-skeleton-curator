@@ -24,3 +24,4 @@ scipy==1.13.3
 qtpy==2.4.1
 pyqtgraph==0.13.7
 magicgui==0.8.3
+qtconsole==5.4.2
